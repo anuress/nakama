@@ -500,6 +500,111 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(rc, 2)
         self.assertIn("unknown role", out["error"])
 
+    def install_json_fake(self, command, outputs):
+        script = self.bin_dir / command
+        script.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FAKE_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+outputs = json.loads({json.dumps(json.dumps(outputs))})
+value = outputs.get(' '.join(sys.argv[1:3]), {{}})
+print(value if isinstance(value, str) else json.dumps(value))
+""")
+        script.chmod(0o755)
+
+    def test_role_frontmatter_unquotes_values_and_accepts_yaml_name_list(self):
+        (self.root / "roles" / "yaml.md").write_text("""---
+prefix: y
+kind: claude
+model: \"opus\"
+mode: read
+budget: '7'
+names: [zoro, sanji]
+---
+You are a reviewer.
+""")
+        rc, out = self.nakama("roles")
+        self.assertEqual(rc, 0, out)
+        role = next(role for role in out["roles"] if role["role"] == "yaml")
+        self.assertEqual(role["model"], "opus")
+        self.assertEqual(role["budget"], 7)
+        self.assertEqual(role["names"], ["zoro", "sanji"])
+
+    def test_non_integer_role_budget_returns_json_error_for_role_commands(self):
+        (self.root / "roles" / "broken.md").write_text("""---
+prefix: x
+budget: abc
+---
+Broken role.
+""")
+        expected = {"error": "role broken: budget must be a whole number of minutes"}
+        for args in (("launch", "broken", "x"), ("roles",), ("sweep",)):
+            with self.subTest(args=args):
+                rc, out = self.nakama(*args)
+                self.assertEqual(rc, 2)
+                self.assertEqual(out, expected)
+
+    def test_malformed_herdr_list_output_returns_json_error(self):
+        self.install_json_fake("herdr", {"agent list": "not json"})
+        rc, out = self.nakama("launch", "builder", "x")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {"error": "herdr agent list returned unexpected output", "stdout": "not json\n"})
+
+    def test_missing_agent_status_returns_json_error(self):
+        records = self.root / "records"
+        records.mkdir()
+        (records / "b1-order-tip.json").write_text(json.dumps({
+            "name": "b1-order-tip", "role": "builder", "kind": "pi", "worktree": str(self.root),
+            "rounds": 0, "closed": False,
+        }))
+        self.install_json_fake("herdr", {
+            "agent list": {"result": {"agents": []}},
+            "agent get": {"result": {"agent": {}}},
+        })
+        rc, out = self.nakama("list")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {"error": "herdr agent get returned unexpected output", "stdout": '{"result": {"agent": {}}}\n'})
+
+    def test_wt_switch_missing_path_fails_before_copy_ignored(self):
+        self.install_json_fake("wt", {"switch -c": {}})
+        rc, out = self.nakama("launch", "builder", "x")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {"error": "wt switch returned unexpected output", "stdout": "{}\n"})
+        self.assertNotIn(["step", "copy-ignored", "--require-include"], self.calls())
+
+    def test_tab_create_missing_pane_id_returns_json_error(self):
+        self.install_json_fake("herdr", {
+            "agent list": {"result": {"agents": []}},
+            "tab create": {"result": {"tab": {"tab_id": "w1:t5"}}},
+        })
+        rc, out = self.nakama("launch", "builder", "x")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {
+            "error": "herdr tab create returned unexpected output",
+            "stdout": '{"result": {"tab": {"tab_id": "w1:t5"}}}\n',
+        })
+
+    def test_pane_split_missing_id_returns_json_error(self):
+        self.install_json_fake("herdr", {
+            "agent list": {"result": {"agents": []}},
+            "pane split": {"result": {"pane": {}}},
+        })
+        rc, out = self.nakama("launch", "builder", "x", "--layout", "split")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {
+            "error": "herdr pane split returned unexpected output",
+            "stdout": '{"result": {"pane": {}}}\n',
+        })
+
+    def test_sweep_missing_worktree_items_returns_json_error(self):
+        self.install_json_fake("herdr", {"agent list": {"result": {"agents": []}}})
+        self.install_json_fake("wt", {"list --format": {"schema": 2}})
+        rc, out = self.nakama("sweep")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, {
+            "error": "wt list returned unexpected output", "stdout": '{"schema": 2}\n',
+        })
+
     def test_user_roles_override_bundled(self):
         user = self.root / "userroles"
         user.mkdir()

@@ -72,26 +72,50 @@ def find_key(obj, key):
     return None
 
 
+def parse_external_json(stdout, command, expected):
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        emit({"error": f"{command} returned unexpected output", "stdout": stdout[:300]}, 1)
+    for key, value_type in expected.items():
+        value = find_key(data, key)
+        if (not isinstance(value, value_type) or (isinstance(value, str) and not value)
+                or (isinstance(value, list) and any(not isinstance(item, dict) for item in value))):
+            emit({"error": f"{command} returned unexpected output", "stdout": stdout[:300]}, 1)
+    return data
+
+
 def load_role(role):
     path = next((d / f"{role}.md" for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR) if (d / f"{role}.md").is_file()), None)
     if path is None:
         emit({"error": f"unknown role {role}: no {role}.md in {USER_ROLES_DIR} or {BUNDLED_ROLES_DIR}"}, 2)
     text = path.read_text()
     meta, body = {}, text
+
+    def unquote(value):
+        return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
+
     if text.startswith("---\n"):
         head, _, body = text[4:].partition("\n---\n")
         for line in head.splitlines():
             key, sep, value = line.partition(":")
             if sep:
-                meta[key.strip()] = value.split("#")[0].strip()
+                meta[key.strip()] = unquote(value.split("#")[0].strip())
+    try:
+        budget = int(meta.get("budget") or 20)
+    except ValueError:
+        emit({"error": f"role {role}: budget must be a whole number of minutes"}, 2)
+    names = meta.get("names", "").strip()
+    if names.startswith("[") and names.endswith("]"):
+        names = names[1:-1]
     return {
         "role": role,
         "prefix": meta.get("prefix") or role[0],
         "kind": meta.get("kind") or "pi",
         "model": meta.get("model") or None,
         "mode": meta.get("mode") or "read",
-        "budget": int(meta.get("budget") or 20),
-        "names": [n.strip() for n in meta.get("names", "").split(",") if n.strip()],
+        "budget": budget,
+        "names": [unquote(n.strip()) for n in names.split(",") if n.strip()],
         "spawns": meta.get("spawns", "").lower() in ("true", "yes"),
         "path": str(path),
         "body": body.lstrip(),
@@ -171,15 +195,18 @@ def agent_dir(rec):
 
 
 def live_names():
-    data = json.loads(run(["herdr", "agent", "list"]).stdout)
-    return [a.get("name") for a in data["result"]["agents"] if a.get("name")]
+    data = parse_external_json(
+        run(["herdr", "agent", "list"]).stdout, "herdr agent list", {"agents": list})
+    return [a["name"] for a in find_key(data, "agents")
+            if isinstance(a, dict) and isinstance(a.get("name"), str) and a["name"]]
 
 
 def agent_status(name):
     p = run(["herdr", "agent", "get", name], check=False)
     if p.returncode != 0:
         return None
-    return find_key(json.loads(p.stdout), "agent_status")
+    data = parse_external_json(p.stdout, "herdr agent get", {"agent_status": str})
+    return find_key(data, "agent_status")
 
 
 def visible(name):
@@ -239,7 +266,8 @@ def cmd_launch(a):
     else:
         branch = f"agent/{name}"
         out = run(["wt", "switch", "-c", branch, "--base", a.base, "--no-cd", "--yes", "--format", "json"]).stdout
-        worktree = find_key(json.loads(out), WT_PATH_KEY)
+        worktree = find_key(
+            parse_external_json(out, "wt switch", {WT_PATH_KEY: str}), WT_PATH_KEY)
         run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree)
     rec = {
         "name": name, "role": a.role, "kind": a.kind or meta["kind"],
@@ -256,7 +284,11 @@ def cmd_launch(a):
         surface = ["herdr", "pane", "split", "--current", "--direction", a.direction, "--cwd", worktree, "--no-focus"]
     for key, value in worker_env(name).items():
         surface += ["--env", f"{key}={value}"]
-    created = json.loads(run(surface).stdout)
+    expected = {"pane_id": str}
+    if a.layout == "tab":
+        expected["tab_id"] = str
+    command = "herdr tab create" if a.layout == "tab" else "herdr pane split"
+    created = parse_external_json(run(surface).stdout, command, expected)
     rec["pane"] = find_key(created, "pane_id")
     rec["tab"] = find_key(created, "tab_id") if a.layout == "tab" else None
     # The GH_CONFIG_DIR worker_env made: teardown removes exactly this one and nothing else.
@@ -385,9 +417,11 @@ def cmd_sweep(a):
     # A custom --name matches no pattern; a record (open or closed) is what marks an agent as ours.
     recorded = {r["name"] for r in records()}
     stray = [n for n in live_names() if n not in known and (is_nakama_name(n, metas) or n in recorded)]
-    listed = json.loads(run(["wt", "list", "--format", "json"]).stdout)
-    trees = listed.get("items", []) if isinstance(listed, dict) else listed
-    branches = [t.get("branch") for t in trees if (t.get("branch") or "").startswith("agent/")]
+    listed = parse_external_json(
+        run(["wt", "list", "--format", "json"]).stdout, "wt list", {"items": list})
+    trees = find_key(listed, "items")
+    branches = [t["branch"] for t in trees
+                if isinstance(t.get("branch"), str) and t["branch"].startswith("agent/")]
     emit({"open_records": [{"name": r["name"], "state": agent_status(r["name"])} for r in recs],
           "stray_agents": stray, "agent_worktrees": branches})
 
