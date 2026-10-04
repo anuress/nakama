@@ -204,10 +204,32 @@ class NakamaTest(unittest.TestCase):
     def test_wait_returns_fresh_result_status(self):
         out = self.launch()
         self.task(out)
-        self.set_state(status="working", after_wait_status="idle",
+        self.set_state(status="idle",
                        write_on_prompt={"path": self.result(out), "text": "Status: succeeded\n## Summary\nok\n"})
         self.assertEqual(self.nakama("prompt", out["name"], "task.md")[1]["status"], "prompted")
+        self.set_state(status="working", after_wait_status="idle")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "succeeded")
+
+    def test_fresh_result_counts_only_once_the_agent_settles(self):
+        # An agent may write result.md and keep working (commit, rewrite it); that is not done yet.
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": "Status: succeeded\n"})
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
+        self.set_state(status="idle")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "succeeded")
+
+    def test_prompt_refused_while_agent_is_working(self):
+        out = self.launch()
+        self.task(out)
+        self.task(out, "fix-1.md")
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        rc, res = self.nakama("prompt", out["name"], "fix-1.md")
+        self.assertEqual((rc, res["status"], res["rounds"]), (0, "busy", 0))
+        self.assertEqual(sum(1 for c in self.calls() if c[1:3] == ["agent", "prompt"]), 1)
 
     def test_stale_result_is_ignored(self):
         out = self.launch()
@@ -263,8 +285,8 @@ class NakamaTest(unittest.TestCase):
         # herdr reports pi extension dialogs (e.g. a security scanner) as working, not blocked.
         out = self.launch()
         self.task(out)
-        self.set_state(status="working", screen="Suspicious bash command detected. Allow execution?\n Yes\n No")
         self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", screen="Suspicious bash command detected. Allow execution?\n Yes\n No")
         res = self.nakama("wait", out["name"], "--timeout", "5")[1]
         self.assertEqual(res["status"], "blocked")
         self.assertIn("Allow execution?", res["screen"])
@@ -272,8 +294,8 @@ class NakamaTest(unittest.TestCase):
     def test_screen_of_a_busy_agent_falls_back_to_visible(self):
         out = self.launch()
         self.task(out)
-        self.set_state(status="working", busy_read_fails=True)
         self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", busy_read_fails=True)
         record = self.root / "records" / f"{out['name']}.json"
         rec = json.loads(record.read_text())
         rec["prompted_at"] -= 46 * 60
@@ -284,8 +306,8 @@ class NakamaTest(unittest.TestCase):
     def test_over_budget(self):
         out = self.launch()
         self.task(out)
-        self.set_state(status="working")
         self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
         record = self.root / "records" / f"{out['name']}.json"
         rec = json.loads(record.read_text())
         rec["prompted_at"] -= 46 * 60
@@ -307,8 +329,8 @@ class NakamaTest(unittest.TestCase):
     def test_running_when_timeout_expires(self):
         out = self.launch()
         self.task(out)
-        self.set_state(status="working")
         self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
 
     def test_teardown_closes_tab_and_keeps_worktree_by_default(self):

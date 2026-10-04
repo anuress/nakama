@@ -274,6 +274,8 @@ def cmd_prompt(a):
     task = agent_dir(rec) / Path(a.file).name
     if not task.is_file():
         emit({"error": f"{task} does not exist"}, 2)
+    if agent_status(rec["name"]) == "working":
+        emit({"name": rec["name"], "status": "busy", "rounds": rec["rounds"]})
     if task.name.startswith("fix-") and not a.answer:
         if rec["rounds"] >= MAX_ROUNDS:
             emit({"name": rec["name"], "status": "round_limit", "rounds": rec["rounds"]})
@@ -296,10 +298,11 @@ def cmd_wait(a):
               "result": str(agent_dir(rec) / "result.md"), **extra})
 
     while True:
-        status = fresh_status(rec)
-        if status:
-            done(status)
         state = agent_status(rec["name"])
+        status = fresh_status(rec)
+        # A fresh result counts only once the agent has settled: it may still commit or rewrite it.
+        if status and state in ("idle", "done", None):
+            done(status)
         if state is None:
             done("failed", reason="agent or pane gone")
         if state == "blocked":

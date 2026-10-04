@@ -31,7 +31,7 @@ nakama teardown b1-fix-login
 Claude workers always get an explicit `--permission-mode` (`acceptEdits` for write, `default` for read), because a user default of auto mode would override the allow list. Allow your project's build and test commands in that repo's `.claude/settings.local.json`; Claude reads it from worktrees too.
 
 ## Safety
-Worker panes get env vars that make `git push`, git over HTTPS and `gh` fail. That is an accident guard, not a sandbox: an agent that deliberately clears its environment can get around it. Read-only roles are enforced by Claude's permission mode and pi's tool list, and the orchestrator checks `git status` afterwards.
+Worker panes get env vars that make `git push`, git over HTTPS and `gh` fail. That is an accident guard, not a sandbox: an agent that deliberately clears its environment can get around it. Read-only roles are enforced only for Claude workers (permission mode `default` with a read allow list). For pi workers they are an instruction contract: pi's read tool list still includes `bash` and `write`. The orchestrator checks afterwards that `git status`, `HEAD` and `git stash list` are unchanged.
 
 ## Development
 `python3 tests/test_nakama.py` (uses fake herdr/wt; no herdr needed).

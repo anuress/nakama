@@ -29,7 +29,7 @@ You are a reviewer: ...
 | `nakama launch builder <slug> [--base REF] [--model M] [--name N] [--layout tab\|split]` | new worktree on `agent/<name>` + its own herdr tab (default; `split` = pane beside you) + agent. Returns `name`, `dir`, `worktree` |
 | `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
 | `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
-| `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` |
+| `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` Returns `busy` (nothing sent) while the agent is still working: `nakama wait` first |
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
 | `nakama wait <name>` | returns within ~5 min; on `running`, call it again |
@@ -43,7 +43,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 ## wait outcomes
 | status | Do |
 |---|---|
-| succeeded / partial / failed / needs_input | read `result` and act on the Status, not the wording |
+| succeeded / partial / failed / needs_input | the agent has settled with a fresh result.md: read `result` and act on the Status, not the wording |
 | malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
 | blocked | show `screen` to the user; never answer it yourself (one exception below) |
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |

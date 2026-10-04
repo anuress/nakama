@@ -40,7 +40,7 @@ Run the Acceptance commands yourself in the builder's worktree, writing the outp
 
 ## 5. Review
 `nakama launch reviewer <slug> --join <builder>` (add `--model` if the role default equals the builder's model). task.md scope = `git diff <base>...HEAD` plus intent and the user's decisions; a re-review lists the prior findings and their fixes.
-- After each review, `git -C <worktree> status --porcelain` must show nothing outside .agent/; otherwise reject that review.
+- Before each review, note `git -C <worktree> rev-parse HEAD` and `git -C <worktree> stash list`. After it, `status --porcelain` must show nothing outside .agent/ and HEAD and the stash list must be unchanged; otherwise reject that review and tell the user (a pi reviewer's read-only mode is only an instruction).
 - Verify every finding against the code before accepting it. Drop speculation, style and duplicates. Tag sources (reviewer names, or both).
 - Accepted findings → fix-N.md to the builder → back to step 4. None → step 6.
 
