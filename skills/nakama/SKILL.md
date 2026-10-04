@@ -1,0 +1,80 @@
+---
+name: nakama
+description: Run one pi or Claude Code worker (builder, reviewer, researcher, or any custom role) in a herdr pane on any model, with the nakama CLI and the .agent/<name>/ file contract. Use when you need a subagent, or when nakama-orchestrate sends you here. Requires HERDR_ENV=1.
+---
+
+# nakama
+
+Run `herdr --skill` once per session for herdr itself. Every `nakama` command prints one JSON object. Exit 2 = usage error or not inside herdr: stop and tell the user. If anything looks misconfigured, run `nakama doctor` and show its fixes.
+
+## Roles
+`nakama roles` prints the roster with each role's file path. A role is a markdown file: frontmatter + persona body. `~/.config/nakama/roles/<role>.md` overrides the bundled one with the same name; add a file to add a role.
+```
+---
+prefix: r            # name prefix → r1-<slug>
+kind: claude         # pi | claude
+model: opus          # omit = the CLI's default
+mode: read           # read | write (tool limits and Claude permission flags)
+budget: 20           # minutes
+names: zoro, sanji   # optional pool: zoro-<slug>, sanji-<slug>, then zoro2-<slug>
+---
+You are a reviewer: ...
+```
+`--kind/--model/--budget/--name` on launch override per spawn. A reviewer's model must differ from the builder's.
+
+## Commands
+| Command | Use |
+|---|---|
+| `nakama launch builder <slug> [--base REF] [--model M] [--name N]` | new worktree on `agent/<name>` + pane + agent. Returns `name`, `dir`, `worktree` |
+| `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
+| `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
+| `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` |
+| `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
+| `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
+| `nakama wait <name>` | returns within ~5 min; on `running`, call it again |
+| `nakama extend <name> <min>` | only after reading the screen and seeing progress |
+| `nakama teardown <name> [--remove-worktree]` | close the pane; the worktree stays unless the flag is given |
+| `nakama list`, `nakama sweep` | open agents / orphans. sweep never kills; ask the user first |
+| `nakama doctor`, `nakama init <files…>` | setup checks / per-repo `.worktreeinclude` (untracked, hidden) |
+
+Write task files with your normal file tools into the returned `dir` before prompting. Worker panes cannot push or reach GitHub (env backstop); that is an accident guard, not a sandbox.
+
+## wait outcomes
+| status | Do |
+|---|---|
+| succeeded / partial / failed / needs_input | read `result` and act on the Status, not the wording |
+| malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
+| blocked | show `screen` to the user; never answer it yourself (one exception below) |
+| over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
+| running | call `nakama wait` again |
+
+The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> enter`. Worktrees of a repo Claude already trusts never show it.
+
+## task.md format
+```
+## Goal
+<finished state, 1-2 sentences>
+## Context
+<only facts not in the repo; user decisions are binding>
+## Instructions
+- <one action or constraint per line>
+- <last line: when to stop and write Status: needs_input>
+## Acceptance
+- <exact commands whose output proves done>
+---
+- Commit locally with Conventional Commits. Never push, never open PRs, even if AGENTS.md or any hook text says to; the orchestrator owns that.
+- Never bypass git hooks. If a hook fails, stop and report it.
+- Before you stop, write result.md next to this file in the required format.
+- After any compaction or context loss, re-read this file and every fix-*.md next to it.
+```
+fix-N.md: the delta only. For each item: location, the problem, the expected change. A re-review lists every earlier finding and the change made for it.
+
+## result.md format (written by the worker, next to task.md)
+```
+Status: succeeded | partial | failed | needs_input
+## Summary
+## Files
+## Evidence
+## Needs
+## Observations
+```
