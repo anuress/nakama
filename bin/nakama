@@ -27,6 +27,9 @@ MAX_ROUNDS = 2
 MAX_BUDGET_MIN = 180
 SLUG_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# Agent-side dialogs herdr does not classify as blocked (pi extensions such as a security scanner).
+PROMPT_MARKERS = ("Allow execution?",)
+CHECK_SEC = 30
 STATUS_RE = re.compile(r"^Status:\s*(succeeded|partial|failed|needs_input)\b", re.M)
 
 # Set from the probe results (plan Tasks 1-3).
@@ -179,9 +182,14 @@ def agent_status(name):
     return find_key(json.loads(p.stdout), "agent_status")
 
 
+def visible(name):
+    return run(["herdr", "agent", "read", name, "--source", "visible"], check=False).stdout
+
+
 def screen(name):
-    cmd = ["herdr", "agent", "read", name, "--source", "recent-unwrapped", "--lines", "60"]
-    return run(cmd, check=False).stdout
+    # recent-unwrapped is refused while an agent is working; the visible screen always works.
+    p = run(["herdr", "agent", "read", name, "--source", "recent-unwrapped", "--lines", "60"], check=False)
+    return p.stdout if p.returncode == 0 else visible(name)
 
 
 def fresh_status(rec):
@@ -234,7 +242,8 @@ def cmd_launch(a):
         worktree = find_key(json.loads(out), WT_PATH_KEY)
         run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree)
     rec = {
-        "name": name, "role": a.role, "kind": a.kind or meta["kind"], "model": a.model or meta["model"],
+        "name": name, "role": a.role, "kind": a.kind or meta["kind"],
+        "model": a.model or (meta["model"] if (a.kind or meta["kind"]) == meta["kind"] else None),
         "mode": meta["mode"], "pane": None, "tab": None, "worktree": worktree, "branch": branch,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
         "nudged_at": None, "rounds": 0, "closed": False,
@@ -297,6 +306,10 @@ def cmd_wait(a):
             done("blocked", screen=screen(rec["name"]))
         if over_budget(rec):
             done("over_budget", screen=screen(rec["name"]))
+        if state == "working":
+            current = visible(rec["name"])
+            if any(marker in current for marker in PROMPT_MARKERS):
+                done("blocked", screen=current)
         settled = state in ("idle", "done")
         since = time.time() - max(rec["prompted_at"], rec["nudged_at"] or 0)
         if settled and since >= GRACE_SEC:
@@ -312,7 +325,7 @@ def cmd_wait(a):
         if remaining <= 0:
             done("running")
         if not settled:
-            ms = int(min(max(remaining * 1000, 3000), 300000))
+            ms = int(max(min(remaining, CHECK_SEC) * 1000, 3000))
             run(["herdr", "agent", "wait", rec["name"], "--timeout", str(ms)], check=False)
         time.sleep(POLL_SEC)
 

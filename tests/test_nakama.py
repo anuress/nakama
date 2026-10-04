@@ -44,7 +44,9 @@ elif cmd == ["agent", "wait"]:
         st["status"] = st["after_wait_status"]
         save()
 elif cmd == ["agent", "read"]:
-    print("SCREEN")
+    if st.get("busy_read_fails") and "recent-unwrapped" in args:
+        sys.exit(1)
+    print(st.get("screen", "SCREEN"))
 '''
 
 FAKE_WT = r'''#!/usr/bin/env python3
@@ -257,6 +259,28 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(res["status"], "blocked")
         self.assertIn("SCREEN", res["screen"])
 
+    def test_extension_dialog_while_working_is_blocked(self):
+        # herdr reports pi extension dialogs (e.g. a security scanner) as working, not blocked.
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working", screen="Suspicious bash command detected. Allow execution?\n Yes\n No")
+        self.nakama("prompt", out["name"], "task.md")
+        res = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(res["status"], "blocked")
+        self.assertIn("Allow execution?", res["screen"])
+
+    def test_screen_of_a_busy_agent_falls_back_to_visible(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working", busy_read_fails=True)
+        self.nakama("prompt", out["name"], "task.md")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["prompted_at"] -= 46 * 60
+        record.write_text(json.dumps(rec))
+        res = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual((res["status"], res["screen"].strip()), ("over_budget", "SCREEN"))
+
     def test_over_budget(self):
         out = self.launch()
         self.task(out)
@@ -344,6 +368,16 @@ class NakamaTest(unittest.TestCase):
         self.assertIn("--tools", start)
         rec = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
         self.assertEqual(rec["budget_min"], 5)
+
+    def test_kind_override_drops_the_roles_model(self):
+        # A role's model names a model of its own kind; under another CLI it is meaningless.
+        self.nakama("launch", "reviewer", "tip", "--no-worktree", "--kind", "pi")
+        self.assertNotIn("--model", self.start_call())
+
+    def test_explicit_model_survives_kind_override(self):
+        self.nakama("launch", "reviewer", "tip", "--no-worktree", "--kind", "pi", "--model", "x/y")
+        start = self.start_call()
+        self.assertEqual(start[start.index("--model") + 1], "x/y")
 
     def test_name_pool_then_numbered(self):
         names = [self.nakama("launch", "reviewer", "tip", "--no-worktree")[1]["name"] for _ in range(3)]
