@@ -121,6 +121,22 @@ class NakamaTest(unittest.TestCase):
     def result(self, out):
         return str(Path(out["dir"], "result.md"))
 
+    def help_text(self, *args):
+        return subprocess.run([sys.executable, str(NAKAMA), *args, "--help"],
+                              capture_output=True, text=True).stdout
+
+    def test_help_describes_every_command(self):
+        text = self.help_text()
+        self.assertNotIn("{launch,", text)
+        for command in ("launch", "prompt", "wait", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
+            line = next((l for l in text.splitlines() if l.strip().startswith(command + " ")), "")
+            self.assertTrue(line.split(command, 1)[1].strip(), f"no description for {command}")
+
+    def test_launch_help_explains_options(self):
+        text = self.help_text("launch")
+        for phrase in ("roles/<role>.md", "own herdr tab", "builder's worktree", "current checkout", "minutes"):
+            self.assertIn(phrase, text)
+
     def test_name_rule_valid_and_capped(self):
         rc, out = self.nakama("launch", "builder", "Order Detail: Tip Tracker!! with a very long title", "--kind", "pi")
         self.assertEqual(rc, 0, out)

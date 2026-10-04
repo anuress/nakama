@@ -447,41 +447,65 @@ def cmd_init(a):
 
 
 def main():
-    p = argparse.ArgumentParser(prog="nakama")
+    p = argparse.ArgumentParser(
+        prog="nakama",
+        description="Run pi / Claude Code workers in herdr tabs, each in its own worktrunk worktree. "
+                    "Every command prints one JSON object.",
+        epilog="typical loop:\n"
+               "  nakama launch builder fix-login        # → b1-fix-login\n"
+               "  $EDITOR <dir>/task.md                  # format: skills/nakama/SKILL.md\n"
+               "  nakama prompt b1-fix-login task.md\n"
+               "  nakama wait b1-fix-login               # repeat while it says running\n"
+               "  nakama teardown b1-fix-login\n\n"
+               "run 'nakama <command> --help' for a command's options.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"nakama {VERSION}")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("launch")
-    s.add_argument("role")
-    s.add_argument("slug")
-    s.add_argument("--kind", choices=["pi", "claude"])
-    s.add_argument("--name")
-    s.add_argument("--model")
-    s.add_argument("--base", default="HEAD")
-    s.add_argument("--budget", type=int)
-    s.add_argument("--layout", choices=["tab", "split"], default="tab")
-    s.add_argument("--direction", choices=["right", "down"], default="right")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    s = sub.add_parser("launch", help="start a worker in its own herdr tab (and worktree)",
+                       description="Start a worker. Defaults come from roles/<role>.md "
+                                   "(~/.config/nakama/roles/ overrides the bundled roles); flags override them.")
+    s.add_argument("role", help="role name, e.g. builder, reviewer, researcher (see 'nakama roles')")
+    s.add_argument("slug", help="short task label; the agent name becomes <prefix><n>-<slug>")
+    s.add_argument("--kind", choices=["pi", "claude"], help="agent CLI (default: the role's kind)")
+    s.add_argument("--name", help="explicit agent name instead of the generated one")
+    s.add_argument("--model", help="model id for that CLI (default: the role's model, if the kind matches)")
+    s.add_argument("--base", default="HEAD", help="git ref the new worktree branches from (default: HEAD)")
+    s.add_argument("--budget", type=int, metavar="MIN", help="time budget in minutes (default: the role's budget)")
+    s.add_argument("--layout", choices=["tab", "split"], default="tab",
+                   help="tab: the agent's own herdr tab (default); split: a pane beside yours")
+    s.add_argument("--direction", choices=["right", "down"], default="right", help="split direction for --layout split")
     where = s.add_mutually_exclusive_group()
-    where.add_argument("--join")
-    where.add_argument("--no-worktree", action="store_true")
-    s = sub.add_parser("prompt")
-    s.add_argument("name")
-    s.add_argument("file")
-    s.add_argument("--answer", action="store_true")
-    s = sub.add_parser("wait")
-    s.add_argument("name")
-    s.add_argument("--timeout", type=float, default=280)
-    s = sub.add_parser("extend")
-    s.add_argument("name")
-    s.add_argument("minutes", type=int)
-    s = sub.add_parser("teardown")
-    s.add_argument("name")
-    s.add_argument("--remove-worktree", action="store_true")
-    sub.add_parser("list")
-    sub.add_parser("sweep")
-    sub.add_parser("roles")
-    sub.add_parser("doctor")
-    s = sub.add_parser("init")
-    s.add_argument("patterns", nargs="+")
+    where.add_argument("--join", metavar="AGENT", help="work in that agent's worktree, e.g. a reviewer in the builder's worktree")
+    where.add_argument("--no-worktree", action="store_true", help="work in the current checkout")
+
+    s = sub.add_parser("prompt", help="send a task or fix file to a worker",
+                       description="Send 'Read .agent/<name>/<file> and do it.' Returns busy while the agent is working.")
+    s.add_argument("name", help="agent name")
+    s.add_argument("file", help="task.md, or fix-N.md for a fix round (max 2)")
+    s.add_argument("--answer", action="store_true", help="answer to needs_input; does not count as a round")
+
+    s = sub.add_parser("wait", help="wait for a worker's result",
+                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/over_budget, "
+                                   "or running when --timeout passes (call it again).")
+    s.add_argument("name", help="agent name")
+    s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")
+
+    s = sub.add_parser("extend", help="add minutes to a worker's time budget (max 180 in total)")
+    s.add_argument("name", help="agent name")
+    s.add_argument("minutes", type=int, help="minutes to add")
+
+    s = sub.add_parser("teardown", help="stop a worker and close its tab")
+    s.add_argument("name", help="agent name")
+    s.add_argument("--remove-worktree", action="store_true", help="also remove its worktree (the branch is kept)")
+
+    sub.add_parser("list", help="list open workers and their herdr state")
+    sub.add_parser("sweep", help="list orphaned workers and agent/* worktrees (kills nothing)")
+    sub.add_parser("roles", help="list roles and the files they come from")
+    sub.add_parser("doctor", help="check the setup and print fix commands")
+    s = sub.add_parser("init", help="write this repo's .worktreeinclude, hidden from git",
+                       description="Gitignored files new worktrees need (e.g. .env), copied in by 'wt step copy-ignored'.")
+    s.add_argument("patterns", nargs="+", help="gitignore-style patterns")
     a = p.parse_args()
     {"launch": cmd_launch, "prompt": cmd_prompt, "wait": cmd_wait, "extend": cmd_extend,
      "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
