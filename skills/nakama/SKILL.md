@@ -17,6 +17,7 @@ model: opus          # omit = the CLI's default
 mode: read           # read | write (tool limits and Claude permission flags)
 budget: 20           # minutes
 names: zoro, sanji   # optional pool: zoro-<slug>, sanji-<slug>, then zoro2-<slug>
+spawns: true         # optional: this role may run `nakama launch` itself (sub-orchestrator); off by default
 ---
 You are a reviewer: ...
 ```

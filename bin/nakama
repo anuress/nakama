@@ -89,6 +89,7 @@ def load_role(role):
         "mode": meta.get("mode") or "read",
         "budget": int(meta.get("budget") or 20),
         "names": [n.strip() for n in meta.get("names", "").split(",") if n.strip()],
+        "spawns": meta.get("spawns", "").lower() in ("true", "yes"),
         "path": str(path),
         "body": body.lstrip(),
     }
@@ -125,8 +126,9 @@ def is_nakama_name(name, metas):
     return False
 
 
-def backstop_env():
+def worker_env(name):
     return {
+        "NAKAMA_AGENT": name,
         "GIT_SSH_COMMAND": "false",
         "GH_CONFIG_DIR": tempfile.mkdtemp(prefix="nakama-gh-"),
         "GIT_TERMINAL_PROMPT": "0",
@@ -211,6 +213,11 @@ def agent_args(rec, meta):
 
 def cmd_launch(a):
     require_herdr()
+    parent = os.environ.get("NAKAMA_AGENT")
+    if parent:
+        parent_role = json.loads(record_path(parent).read_text())["role"] if record_path(parent).is_file() else None
+        if not (parent_role and load_role(parent_role)["spawns"]):
+            emit({"error": f"agent {parent} may not launch agents: its role needs 'spawns: true'"}, 2)
     meta = load_role(a.role)
     if (a.kind or meta["kind"]) not in ("pi", "claude") or meta["mode"] not in CLAUDE_FLAGS:
         emit({"error": f"role {a.role}: kind must be pi|claude and mode read|write"}, 2)
@@ -238,7 +245,7 @@ def cmd_launch(a):
         surface = ["herdr", "tab", "create", "--label", name, "--cwd", worktree, "--no-focus"]
     else:
         surface = ["herdr", "pane", "split", "--current", "--direction", a.direction, "--cwd", worktree, "--no-focus"]
-    for key, value in backstop_env().items():
+    for key, value in worker_env(name).items():
         surface += ["--env", f"{key}={value}"]
     created = json.loads(run(surface).stdout)
     rec["pane"] = find_key(created, "pane_id")

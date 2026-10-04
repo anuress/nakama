@@ -26,7 +26,7 @@ nakama teardown b1-fix-login
 ```
 
 ## Roles
-`roles/*.md`, overridable and extendable in `~/.config/nakama/roles/`. Frontmatter: `prefix`, `kind` (pi|claude), `model`, `mode` (read|write), `budget` (minutes), `names` (optional name pool); the body is the persona. `nakama roles` lists them.
+`roles/*.md`, overridable and extendable in `~/.config/nakama/roles/`. Frontmatter: `prefix`, `kind` (pi|claude), `model`, `mode` (read|write), `budget` (minutes), `names` (optional name pool), `spawns` (optional; lets that role launch its own agents — off by default, so a worker can't recursively spawn a crew); the body is the persona. `nakama roles` lists them.
 
 Claude workers always get an explicit `--permission-mode` (`acceptEdits` for write, `default` for read), because a user default of auto mode would override the allow list. Allow your project's build and test commands in that repo's `.claude/settings.local.json`; Claude reads it from worktrees too.
 

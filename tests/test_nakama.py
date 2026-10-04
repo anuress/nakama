@@ -145,6 +145,29 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(out["pane"], "w1:p8")
         self.assertFalse(any(c[1:3] == ["pane", "split"] for c in self.calls()))
 
+    def test_worker_pane_knows_its_agent_name(self):
+        out = self.launch()
+        tab = next(c for c in self.calls() if c[1:3] == ["tab", "create"])
+        self.assertIn(f"NAKAMA_AGENT={out['name']}", tab)
+
+    def test_worker_cannot_launch_agents_without_spawns(self):
+        parent = self.launch()
+        rc, out = self.nakama("launch", "builder", "child", env={**self.env, "NAKAMA_AGENT": parent["name"]})
+        self.assertEqual(rc, 2)
+        self.assertIn("spawns", out["error"])
+        self.assertEqual(sum(1 for c in self.calls() if c[1:3] == ["tab", "create"]), 1)
+
+    def test_role_with_spawns_may_launch_agents(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "lead.md").write_text("---\nprefix: l\nmode: write\nspawns: true\n---\nYou lead.\n")
+        lead = self.nakama("launch", "lead", "epic")[1]
+        rc, out = self.nakama("launch", "builder", "child", env={**self.env, "NAKAMA_AGENT": lead["name"]})
+        self.assertEqual(rc, 0, out)
+        roles = {r["role"]: r for r in self.nakama("roles")[1]["roles"]}
+        self.assertTrue(roles["lead"]["spawns"])
+        self.assertFalse(roles["builder"]["spawns"])
+
     def test_split_layout_splits_with_push_backstop(self):
         out = self.launch("--layout", "split")
         self.assert_backstop(next(c for c in self.calls() if c[1:3] == ["pane", "split"]))
