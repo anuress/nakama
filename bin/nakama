@@ -39,7 +39,8 @@ CLAUDE_FLAGS = {
     "write": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(git status:*)", "Bash(git diff:*)",
               "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(mkdir:*)"],
     "read": ["--permission-mode", "default", "--allowedTools", "Bash(git diff:*)", "Bash(git log:*)",
-             "Bash(git show:*)", "Bash(git status:*)", "Write(.agent/**)", "Edit(.agent/**)"],
+             "Bash(git show:*)", "Bash(git status:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
+             "Write(.agent/**)", "Edit(.agent/**)"],
 }
 
 
@@ -350,7 +351,8 @@ def cmd_sweep(a):
     known = {r["name"] for r in recs}
     metas = all_roles()
     stray = [n for n in live_names() if is_nakama_name(n, metas) and n not in known]
-    trees = json.loads(run(["wt", "list", "--format", "json"]).stdout)
+    listed = json.loads(run(["wt", "list", "--format", "json"]).stdout)
+    trees = listed.get("items", []) if isinstance(listed, dict) else listed
     branches = [t.get("branch") for t in trees if (t.get("branch") or "").startswith("agent/")]
     emit({"open_records": [{"name": r["name"], "state": agent_status(r["name"])} for r in recs],
           "stray_agents": stray, "agent_worktrees": branches})

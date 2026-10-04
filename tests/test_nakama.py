@@ -57,7 +57,7 @@ if args[0] == "switch":
     os.makedirs(path, exist_ok=True)
     print(json.dumps({"path": path}))
 elif args[0] == "list":
-    print(json.dumps([{"branch": "agent/b1-old"}, {"branch": "develop"}]))
+    print(json.dumps({"schema": 2, "items": [{"branch": "agent/b1-old"}, {"branch": "develop"}]}))
 '''
 
 
@@ -307,6 +307,9 @@ class NakamaTest(unittest.TestCase):
         starts = [c for c in self.calls() if c[1:3] == ["agent", "start"]]
         modes = [s[s.index("--permission-mode") + 1] for s in starts]
         self.assertEqual(modes, ["default", "acceptEdits"])
+        # Read-only inspection must not stop on a permission prompt.
+        for tool in ("Bash(git grep:*)", "Bash(git ls-files:*)"):
+            self.assertIn(tool, starts[0])
 
     def test_flags_override_frontmatter(self):
         rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree",
