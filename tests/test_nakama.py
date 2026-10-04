@@ -349,6 +349,74 @@ class NakamaTest(unittest.TestCase):
         self.set_state(status="working")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
 
+    def test_failed_prompt_leaves_the_record_untouched(self):
+        out = self.launch()
+        self.task(out)
+        self.task(out, "fix-1.md")
+        self.nakama("prompt", out["name"], "task.md")
+        record = self.root / "records" / f"{out['name']}.json"
+        before = record.read_text()
+        broken = r'''#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:3] == ["agent", "prompt"]:
+    sys.exit(7)
+print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
+'''
+        herdr = self.bin_dir / "herdr"
+        herdr.write_text(broken)
+        herdr.chmod(0o755)
+        rc, res = self.nakama("prompt", out["name"], "fix-1.md")
+        self.assertEqual(rc, 1, res)
+        self.assertIn("error", res)
+        self.assertEqual(record.read_text(), before)
+        herdr.write_text(FAKE_HERDR)
+        herdr.chmod(0o755)
+        self.assertEqual(self.nakama("prompt", out["name"], "fix-1.md")[1]["rounds"], 1)
+
+    def test_marker_above_the_screen_tail_is_not_blocked(self):
+        # Source code or a log can quote the dialog; only the last 10 non-empty lines are live.
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", screen="grep output: Allow execution?\n"
+                       + "\n".join(f"work {i}" for i in range(10)))
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
+
+    def test_marker_in_the_screen_tail_still_blocks(self):
+        # The window counts non-empty lines: blank scrollback must not push the dialog out of it.
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", screen="Allow execution?\n" + "\n" * 15 + " Yes\n No")
+        res = self.nakama("wait", out["name"], "--timeout", "0")[1]
+        self.assertEqual(res["status"], "blocked")
+        self.assertIn("Allow execution?", res["screen"])
+
+    def test_teardown_removes_only_the_gh_config_dir_it_created(self):
+        out = self.launch()
+        record = self.root / "records" / f"{out['name']}.json"
+        mine = Path(json.loads(record.read_text())["gh_config_dir"])
+        self.assertTrue(mine.is_dir())
+        self.assertTrue(mine.name.startswith("nakama-gh-"))
+        decoy = Path(tempfile.mkdtemp(prefix="nakama-gh-"))
+        self.assertEqual(self.nakama("teardown", out["name"])[1]["status"], "closed")
+        self.assertFalse(mine.exists())
+        self.assertTrue(decoy.is_dir())
+
+    def test_sweep_finds_custom_names_through_their_record(self):
+        # A custom --name matches no pattern; its record is the only proof nakama started it.
+        out = self.launch("--name", "custom-agent")
+        self.set_state(status="idle", agents=[{"name": "custom-agent"}, {"name": "someone-elses"}])
+        res = self.nakama("sweep")[1]
+        self.assertEqual(res["stray_agents"], [])
+        self.assertEqual([r["name"] for r in res["open_records"]], [out["name"]])
+        self.nakama("teardown", out["name"])
+        before = len(self.calls())
+        res = self.nakama("sweep")[1]
+        self.assertEqual(res["stray_agents"], ["custom-agent"])
+        self.assertFalse(any(c[1:3] in (["agent", "send-keys"], ["tab", "close"], ["pane", "close"])
+                             for c in self.calls()[before:]))
+
     def test_teardown_closes_tab_and_keeps_worktree_by_default(self):
         out = self.launch()
         res = self.nakama("teardown", out["name"])[1]

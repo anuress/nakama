@@ -259,6 +259,8 @@ def cmd_launch(a):
     created = json.loads(run(surface).stdout)
     rec["pane"] = find_key(created, "pane_id")
     rec["tab"] = find_key(created, "tab_id") if a.layout == "tab" else None
+    # The GH_CONFIG_DIR worker_env made: teardown removes exactly this one and nothing else.
+    rec["gh_config_dir"] = next(v.split("=", 1)[1] for v in surface if v.startswith("GH_CONFIG_DIR="))
     save(rec)
     start = ["herdr", "agent", "start", name, "--kind", rec["kind"], "--pane", rec["pane"], "--timeout", "60000",
              "--", *agent_args(rec, meta)]
@@ -280,10 +282,12 @@ def cmd_prompt(a):
         if rec["rounds"] >= MAX_ROUNDS:
             emit({"name": rec["name"], "status": "round_limit", "rounds": rec["rounds"]})
         rec["rounds"] += 1
-    rec.update(prompted_at=time.time(), nudged_at=None, extended_min=0)
-    save(rec)
     rel = task.relative_to(rec["worktree"])
+    prompted_at = time.time()
     run(["herdr", "agent", "prompt", rec["name"], f"Read {rel} and do it."])
+    # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
+    rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0)
+    save(rec)
     emit({"name": rec["name"], "status": "prompted", "file": str(rel), "rounds": rec["rounds"]})
 
 
@@ -311,7 +315,9 @@ def cmd_wait(a):
             done("over_budget", screen=screen(rec["name"]))
         if state == "working":
             current = visible(rec["name"])
-            if any(marker in current for marker in PROMPT_MARKERS):
+            # Only the last 10 non-empty lines are live: code or a log higher up can quote a marker.
+            tail = [line for line in current.splitlines() if line.strip()][-10:]
+            if any(marker in line for line in tail for marker in PROMPT_MARKERS):
                 done("blocked", screen=current)
         settled = state in ("idle", "done")
         since = time.time() - max(rec["prompted_at"], rec["nudged_at"] or 0)
@@ -351,6 +357,9 @@ def cmd_teardown(a):
         run(["herdr", "tab", "close", rec["tab"]], check=False)
     else:
         run(["herdr", "pane", "close", rec["pane"]], check=False)
+    if rec.get("gh_config_dir"):
+        # Only the dir recorded at launch is nakama's to delete.
+        shutil.rmtree(rec["gh_config_dir"], ignore_errors=True)
     removed = False
     if a.remove_worktree and rec["branch"]:
         removed = run(["wt", "remove", rec["branch"], "--yes"], check=False).returncode == 0
@@ -373,7 +382,9 @@ def cmd_sweep(a):
     recs = open_records()
     known = {r["name"] for r in recs}
     metas = all_roles()
-    stray = [n for n in live_names() if is_nakama_name(n, metas) and n not in known]
+    # A custom --name matches no pattern; a record (open or closed) is what marks an agent as ours.
+    recorded = {r["name"] for r in records()}
+    stray = [n for n in live_names() if n not in known and (is_nakama_name(n, metas) or n in recorded)]
     listed = json.loads(run(["wt", "list", "--format", "json"]).stdout)
     trees = listed.get("items", []) if isinstance(listed, dict) else listed
     branches = [t.get("branch") for t in trees if (t.get("branch") or "").startswith("agent/")]
