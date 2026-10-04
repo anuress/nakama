@@ -18,7 +18,7 @@ Per repo (optional): `nakama init <gitignored files worktrees need>`, e.g. `naka
 ## Use
 Inside herdr, ask your agent: "use nakama-orchestrate to …". Or drive it yourself:
 ```bash
-nakama launch builder fix-login            # → b1-fix-login, worktree on agent/b1-fix-login
+nakama launch builder fix-login            # → b1-fix-login in its own tab, worktree on agent/b1-fix-login
 $EDITOR <dir>/task.md                      # format: skills/nakama/SKILL.md
 nakama prompt b1-fix-login task.md
 nakama wait b1-fix-login

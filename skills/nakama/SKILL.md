@@ -25,7 +25,7 @@ You are a reviewer: ...
 ## Commands
 | Command | Use |
 |---|---|
-| `nakama launch builder <slug> [--base REF] [--model M] [--name N]` | new worktree on `agent/<name>` + pane + agent. Returns `name`, `dir`, `worktree` |
+| `nakama launch builder <slug> [--base REF] [--model M] [--name N] [--layout tab\|split]` | new worktree on `agent/<name>` + its own herdr tab (default; `split` = pane beside you) + agent. Returns `name`, `dir`, `worktree` |
 | `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
 | `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
 | `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` |

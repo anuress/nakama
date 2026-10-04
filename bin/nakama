@@ -227,15 +227,21 @@ def cmd_launch(a):
         run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree)
     rec = {
         "name": name, "role": a.role, "kind": a.kind or meta["kind"], "model": a.model or meta["model"],
-        "mode": meta["mode"], "pane": None, "worktree": worktree, "branch": branch,
+        "mode": meta["mode"], "pane": None, "tab": None, "worktree": worktree, "branch": branch,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
         "nudged_at": None, "rounds": 0, "closed": False,
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
-    split = ["herdr", "pane", "split", "--current", "--direction", a.direction, "--cwd", worktree, "--no-focus"]
+    # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
+    if a.layout == "tab":
+        surface = ["herdr", "tab", "create", "--label", name, "--cwd", worktree, "--no-focus"]
+    else:
+        surface = ["herdr", "pane", "split", "--current", "--direction", a.direction, "--cwd", worktree, "--no-focus"]
     for key, value in backstop_env().items():
-        split += ["--env", f"{key}={value}"]
-    rec["pane"] = find_key(json.loads(run(split).stdout), "pane_id")
+        surface += ["--env", f"{key}={value}"]
+    created = json.loads(run(surface).stdout)
+    rec["pane"] = find_key(created, "pane_id")
+    rec["tab"] = find_key(created, "tab_id") if a.layout == "tab" else None
     save(rec)
     start = ["herdr", "agent", "start", name, "--kind", rec["kind"], "--pane", rec["pane"], "--timeout", "60000",
              "--", *agent_args(rec, meta)]
@@ -317,7 +323,10 @@ def cmd_extend(a):
 def cmd_teardown(a):
     rec = load(a.name)
     run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
-    run(["herdr", "pane", "close", rec["pane"]], check=False)
+    if rec.get("tab"):
+        run(["herdr", "tab", "close", rec["tab"]], check=False)
+    else:
+        run(["herdr", "pane", "close", rec["pane"]], check=False)
     removed = False
     if a.remove_worktree and rec["branch"]:
         removed = run(["wt", "remove", rec["branch"], "--yes"], check=False).returncode == 0
@@ -424,6 +433,7 @@ def main():
     s.add_argument("--model")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--budget", type=int)
+    s.add_argument("--layout", choices=["tab", "split"], default="tab")
     s.add_argument("--direction", choices=["right", "down"], default="right")
     where = s.add_mutually_exclusive_group()
     where.add_argument("--join")

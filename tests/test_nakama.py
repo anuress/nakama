@@ -24,6 +24,8 @@ if args == ["--version"]:
     print("herdr " + st.get("version", "0.9.3"))
 elif cmd == ["pane", "split"]:
     print(json.dumps({"result": {"pane": {"pane_id": "w1:p9"}}}))
+elif cmd == ["tab", "create"]:
+    print(json.dumps({"result": {"tab": {"tab_id": "w1:t5"}, "root_pane": {"pane_id": "w1:p8"}}}))
 elif cmd == ["agent", "list"]:
     print(json.dumps({"result": {"agents": st.get("agents", [])}}))
 elif cmd == ["agent", "start"]:
@@ -127,14 +129,26 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(self.launch()["name"], "b1-order-tip")
         self.assertEqual(self.launch()["name"], "b2-order-tip")
 
-    def test_launch_applies_push_backstop(self):
-        self.launch()
-        split = next(c for c in self.calls() if c[1:3] == ["pane", "split"])
-        envs = [split[i + 1] for i, value in enumerate(split) if value == "--env"]
+    def assert_backstop(self, call):
+        envs = [call[i + 1] for i, value in enumerate(call) if value == "--env"]
         for expected in ("GIT_SSH_COMMAND=false", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=1",
                          "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0="):
             self.assertIn(expected, envs)
         self.assertTrue(any(e.startswith("GH_CONFIG_DIR=") and len(e) > 14 for e in envs))
+
+    def test_launch_opens_own_tab_with_push_backstop(self):
+        out = self.launch()
+        tab = next(c for c in self.calls() if c[1:3] == ["tab", "create"])
+        self.assertEqual(tab[tab.index("--label") + 1], out["name"])
+        self.assertIn("--no-focus", tab)
+        self.assert_backstop(tab)
+        self.assertEqual(out["pane"], "w1:p8")
+        self.assertFalse(any(c[1:3] == ["pane", "split"] for c in self.calls()))
+
+    def test_split_layout_splits_with_push_backstop(self):
+        out = self.launch("--layout", "split")
+        self.assert_backstop(next(c for c in self.calls() if c[1:3] == ["pane", "split"]))
+        self.assertEqual(out["pane"], "w1:p9")
 
     def test_launch_creates_worktree_on_agent_branch(self):
         out = self.launch()
@@ -250,12 +264,17 @@ class NakamaTest(unittest.TestCase):
         self.nakama("prompt", out["name"], "task.md")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
 
-    def test_teardown_closes_pane_and_keeps_worktree_by_default(self):
+    def test_teardown_closes_tab_and_keeps_worktree_by_default(self):
         out = self.launch()
         res = self.nakama("teardown", out["name"])[1]
         self.assertEqual(res, {"name": out["name"], "status": "closed", "worktree_removed": False})
-        self.assertIn(["herdr", "pane", "close", "w1:p9"], self.calls())
+        self.assertIn(["herdr", "tab", "close", "w1:t5"], self.calls())
         self.assertFalse(any(c[:2] == ["wt", "remove"] for c in self.calls()))
+
+    def test_teardown_of_split_layout_closes_pane(self):
+        out = self.launch("--layout", "split")
+        self.nakama("teardown", out["name"])
+        self.assertIn(["herdr", "pane", "close", "w1:p9"], self.calls())
 
     def test_sweep_lists_orphans_and_kills_nothing(self):
         builder = self.launch()
@@ -264,7 +283,8 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(res["stray_agents"], ["r7-stray"])
         self.assertEqual([r["name"] for r in res["open_records"]], [builder["name"]])
         self.assertEqual(res["agent_worktrees"], ["agent/b1-old"])
-        self.assertFalse(any(c[1:3] in (["pane", "close"], ["agent", "send-keys"]) for c in self.calls()))
+        self.assertFalse(any(c[1:3] in (["pane", "close"], ["tab", "close"], ["agent", "send-keys"])
+                             for c in self.calls()))
 
     def start_call(self):
         return next(c for c in self.calls() if c[1:3] == ["agent", "start"])
