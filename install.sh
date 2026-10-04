@@ -3,7 +3,15 @@
 # Usage: ./install.sh [--uninstall]
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# Physical path of a link target: a symlink may record this clone under any spelling of its path.
+resolved() {
+  local path="$1" base="${2:-.}"
+  case "$path" in /*) ;; *) path="$base/$path" ;; esac
+  echo "$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+}
+
 LINKS=(
   "$HOME/.local/bin/nakama|$REPO/bin/nakama"
   "$HOME/.agents/skills/nakama|$REPO/skills/nakama"
@@ -19,7 +27,7 @@ for pair in "${LINKS[@]}"; do
   link="${pair%%|*}"
   target="${pair#*|}"
   ours=false
-  [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ] && ours=true
+  [ -L "$link" ] && [ "$(resolved "$(readlink "$link")" "$(dirname "$link")")" = "$(resolved "$target")" ] && ours=true
   if $uninstall; then
     if $ours; then rm "$link" && echo "removed $link"; fi
     continue

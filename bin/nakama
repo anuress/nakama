@@ -419,9 +419,13 @@ def cmd_doctor(a):
               "herdr integration install claude")
     check("nakama on PATH", shutil.which("nakama"),
           'add to your shell profile: export PATH="$HOME/.local/bin:$PATH"', "warn")
+    # Ask git in a scratch repo so any spelling of the pattern counts and only global excludes do.
+    with tempfile.TemporaryDirectory(prefix="nakama-doctor-") as probe:
+        run(["git", "init", "-q"], cwd=probe, check=False)
+        asked = run(["git", "check-ignore", "-q", "--no-index", ".agent/x"], cwd=probe, check=False)
     ignore = global_ignore_file()
-    ignored = ignore.is_file() and ".agent/" in ignore.read_text().split()
-    check(".agent/ globally git-ignored", ignored, f"mkdir -p {ignore.parent} && echo '.agent/' >> {ignore}")
+    check(".agent/ globally git-ignored", asked.returncode == 0,
+          f"mkdir -p {ignore.parent} && echo '.agent/' >> {ignore}")
     top = run(["git", "rev-parse", "--show-toplevel"], check=False)
     if top.returncode == 0:
         check(".worktreeinclude in this repo", Path(top.stdout.strip(), ".worktreeinclude").is_file(),

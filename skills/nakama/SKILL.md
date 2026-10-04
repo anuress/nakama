@@ -32,8 +32,8 @@ You are a reviewer: ...
 | `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` Returns `busy` (nothing sent) while the agent is still working: `nakama wait` first |
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
-| `nakama wait <name>` | returns within ~5 min; on `running`, call it again |
-| `nakama extend <name> <min>` | only after reading the screen and seeing progress |
+| `nakama wait <name>` | returns within ~5 min; on `running`, call it again. Claude orchestrators: give the Bash tool a timeout above 300000 ms (or pass `--timeout 100`) |
+| `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
 | `nakama teardown <name> [--remove-worktree]` | close the pane; the worktree stays unless the flag is given |
 | `nakama list`, `nakama sweep` | open agents / orphans. sweep never kills; ask the user first |
 | `nakama doctor`, `nakama init <files…>` | setup checks / per-repo `.worktreeinclude` (untracked, hidden) |

@@ -507,6 +507,78 @@ class NakamaTest(unittest.TestCase):
         self.assertIn("SKIP", p.stderr)
         self.assertTrue((home / ".claude/skills/nakama").is_dir())
 
+    def clone_alias(self):
+        alias = self.root / "clone-alias"
+        alias.symlink_to(REPO, target_is_directory=True)
+        return alias
+
+    def test_install_via_symlinked_clone_path_stays_ok(self):
+        # A link must record the physical clone path: re-running through the real path reports ok.
+        home = self.root / "home4"
+        env = {**self.env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        first = subprocess.run([str(self.clone_alias() / "install.sh")], capture_output=True, text=True, env=env)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        link = home / ".local/bin/nakama"
+        self.assertEqual(os.readlink(link), str(NAKAMA))
+        second = subprocess.run([str(REPO / "install.sh")], capture_output=True, text=True, env=env)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("ok      " + str(link), second.stdout)
+
+    def test_uninstall_removes_links_of_either_spelling(self):
+        # A link may name this clone through a symlinked path or the real one; both are ours.
+        home = self.root / "home5"
+        env = {**self.env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        link = home / ".local/bin/nakama"
+        for clone in (self.clone_alias(), REPO):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(clone / "bin/nakama"), str(link))
+            p = subprocess.run([str(REPO / "install.sh"), "--uninstall"], capture_output=True, text=True, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertFalse(link.is_symlink(), f"kept a link spelling {clone}")
+
+    def test_install_leaves_links_into_another_clone_alone(self):
+        other = self.root / "other-clone"
+        (other / "bin").mkdir(parents=True)
+        (other / "bin/nakama").write_text("#!/bin/sh\n")
+        home = self.root / "home6"
+        link = home / ".local/bin/nakama"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(other / "bin/nakama")
+        env = {**self.env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        p = subprocess.run([str(REPO / "install.sh")], capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("SKIP", p.stderr)
+        subprocess.run([str(REPO / "install.sh"), "--uninstall"], capture_output=True, text=True, env=env)
+        self.assertEqual(os.readlink(link), str(other / "bin/nakama"))
+
+    def test_doctor_accepts_any_spelling_of_the_global_ignore(self):
+        env = self.doctor_env(ignored=False)
+        home = Path(env["HOME"])
+        (home / ".config/git").mkdir(parents=True)
+        for spelling in (".agent", "/.agent/", "**/.agent/**"):
+            (home / ".config/git/ignore").write_text(f"*.log\n{spelling}\n")
+            checks = {c["check"]: c for c in self.nakama("doctor", env=env)[1]["checks"]}
+            self.assertTrue(checks[".agent/ globally git-ignored"]["ok"], f"spelling {spelling!r} not recognised")
+
+    def test_doctor_honours_core_excludes_file(self):
+        env = self.doctor_env(ignored=False)
+        home = Path(env["HOME"])
+        (home / ".gitconfig").write_text(f"[core]\n\texcludesFile = {home}/my-ignore\n")
+        (home / "my-ignore").write_text("# extras\n/.agent/\n")
+        checks = {c["check"]: c for c in self.nakama("doctor", env=env)[1]["checks"]}
+        self.assertTrue(checks[".agent/ globally git-ignored"]["ok"], checks[".agent/ globally git-ignored"])
+
+    def test_skill_tells_orchestrators_about_timeouts_and_budget(self):
+        text = (REPO / "skills" / "nakama" / "SKILL.md").read_text()
+        rows = [l for l in text.splitlines() if l.startswith("| `nakama")]
+        wait = next(l for l in rows if l.startswith("| `nakama wait"))
+        extend = next(l for l in rows if l.startswith("| `nakama extend"))
+        self.assertIn("Bash tool", wait)
+        self.assertIn("300000 ms", wait)
+        self.assertIn("--timeout 100", wait)
+        self.assertIn("180-minute ceiling applies per prompt", extend)
+        self.assertIn("--answer", extend)
+
 
 if __name__ == "__main__":
     unittest.main()
