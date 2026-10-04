@@ -49,7 +49,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
 | running | call `nakama wait` again |
 
-The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> enter`. Worktrees of a repo Claude already trusts never show it.
+The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.
 
 ## task.md format
 ```

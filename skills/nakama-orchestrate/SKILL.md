@@ -30,7 +30,7 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
 - failed / malformed / partial with nothing usable → teardown; record the task as stopped.
-Never do delegated work yourself while waiting. Wait for the whole batch before combining results.
+Never do delegated work yourself while waiting. Wait on all running builders round-robin (`nakama wait <name> --timeout 30` each) and take each task into step 4 as soon as its builder settles; don't hold a finished task back for slower ones. Only step 6's merges wait for the batch.
 
 ## 4. Gate
 Run the Acceptance commands yourself in the builder's worktree, writing the output to `<dir>/gate-N.log`. Check the main checkout's `git status --porcelain` still matches Setup.
@@ -39,7 +39,7 @@ Run the Acceptance commands yourself in the builder's worktree, writing the outp
 - Resource symptoms in any build output (the build daemon died, out-of-memory errors, heavy swapping): stop and propose a lower `max_builders` to the user.
 
 ## 5. Review
-`nakama launch reviewer <slug> --join <builder>` (add `--model` if the role default equals the builder's model). task.md scope = `git diff <base>...HEAD` plus intent and the user's decisions; a re-review lists the prior findings and their fixes.
+`nakama launch reviewer <slug> --join <builder>` (add `--model` if the role default equals the builder's model). task.md scope = `git diff <base>...HEAD` plus intent and the user's decisions, and the path to the latest green gate-N.log: reviewers do not run tests or builds (that stops a read-only Claude worker on a permission prompt); they read the tests and the gate log. A re-review lists the prior findings and their fixes.
 - Before each review, note `git -C <worktree> rev-parse HEAD` and `git -C <worktree> stash list`. After it, `status --porcelain` must show nothing outside .agent/ and HEAD and the stash list must be unchanged; otherwise reject that review and tell the user (a pi reviewer's read-only mode is only an instruction).
 - Verify every finding against the code before accepting it. Drop speculation, style and duplicates. Tag sources (reviewer names, or both).
 - Accepted findings → fix-N.md to the builder → back to step 4. None → step 6.
