@@ -83,8 +83,9 @@ class NakamaTest(unittest.TestCase):
         self.log = self.root / "log.jsonl"
         self.log.write_text("")
         self.set_state(status="idle")
-        self.env = {
-            **os.environ,
+        self.env = os.environ.copy()
+        self.env.pop("NAKAMA_AGENT", None)
+        self.env.update({
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "HERDR_ENV": "1",
             "FAKE_STATE": str(self.state),
@@ -95,7 +96,7 @@ class NakamaTest(unittest.TestCase):
             "NAKAMA_USER_ROLES_DIR": str(self.root / "userroles"),
             "NAKAMA_GRACE_SEC": "0",
             "NAKAMA_POLL_SEC": "0",
-        }
+        })
 
     def set_state(self, **state):
         self.state.write_text(json.dumps(state))
