@@ -530,6 +530,20 @@ You are a reviewer.
         self.assertEqual(role["budget"], 7)
         self.assertEqual(role["names"], ["zoro", "sanji"])
 
+    def test_role_frontmatter_keeps_hash_inside_quotes_and_strips_trailing_comments(self):
+        (self.root / "roles" / "hash.md").write_text("""---
+prefix: h
+model: "opus#dev"  # pinned
+budget: 9 # minutes
+---
+You are a reviewer.
+""")
+        rc, out = self.nakama("roles")
+        self.assertEqual(rc, 0, out)
+        role = next(role for role in out["roles"] if role["role"] == "hash")
+        self.assertEqual(role["model"], "opus#dev")
+        self.assertEqual(role["budget"], 9)
+
     def test_non_integer_role_budget_returns_json_error_for_role_commands(self):
         (self.root / "roles" / "broken.md").write_text("""---
 prefix: x

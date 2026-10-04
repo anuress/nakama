@@ -43,7 +43,7 @@ CLAUDE_FLAGS = {
               "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(mkdir:*)"],
     "read": ["--permission-mode", "default", "--allowedTools", "Bash(git diff:*)", "Bash(git log:*)",
              "Bash(git show:*)", "Bash(git status:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
-             "Write(.agent/**)", "Edit(.agent/**)"],
+             "Edit(.agent/**)"],
 }
 
 
@@ -95,12 +95,18 @@ def load_role(role):
     def unquote(value):
         return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
 
+    def scalar(value):
+        value = value.strip()
+        if value[:1] in "'\"" and value[:1] and (end := value.find(value[0], 1)) > 0:
+            return value[1:end]
+        return value.split("#")[0].strip()
+
     if text.startswith("---\n"):
         head, _, body = text[4:].partition("\n---\n")
         for line in head.splitlines():
             key, sep, value = line.partition(":")
             if sep:
-                meta[key.strip()] = unquote(value.split("#")[0].strip())
+                meta[key.strip()] = scalar(value)
     try:
         budget = int(meta.get("budget") or 20)
     except ValueError:
