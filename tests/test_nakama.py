@@ -1,0 +1,394 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+NAKAMA = REPO / "bin" / "nakama"
+
+FAKE_HERDR = r'''#!/usr/bin/env python3
+import json, os, sys, time
+st_path = os.environ["FAKE_STATE"]
+st = json.load(open(st_path))
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["herdr"] + args) + "\n")
+def save():
+    json.dump(st, open(st_path, "w"))
+cmd = args[:2]
+if args == ["--version"]:
+    print("herdr " + st.get("version", "0.9.3"))
+elif cmd == ["pane", "split"]:
+    print(json.dumps({"result": {"pane": {"pane_id": "w1:p9"}}}))
+elif cmd == ["agent", "list"]:
+    print(json.dumps({"result": {"agents": st.get("agents", [])}}))
+elif cmd == ["agent", "start"]:
+    sys.exit(st.get("start_rc", 0))
+elif cmd == ["agent", "get"]:
+    if st.get("status") is None:
+        sys.exit(1)
+    print(json.dumps({"result": {"agent": {"agent_status": st["status"]}}}))
+elif cmd == ["agent", "prompt"]:
+    write = st.get("write_on_prompt")
+    if write:
+        time.sleep(0.02)
+        open(write["path"], "w").write(write["text"])
+elif cmd == ["agent", "wait"]:
+    if "after_wait_status" in st:
+        st["status"] = st["after_wait_status"]
+        save()
+elif cmd == ["agent", "read"]:
+    print("SCREEN")
+'''
+
+FAKE_WT = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["wt"] + args) + "\n")
+if args[0] == "switch":
+    path = os.path.join(os.environ["FAKE_ROOT"], "wt-" + args[2].replace("/", "-"))
+    os.makedirs(path, exist_ok=True)
+    print(json.dumps({"path": path}))
+elif args[0] == "list":
+    print(json.dumps([{"branch": "agent/b1-old"}, {"branch": "develop"}]))
+'''
+
+
+class NakamaTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        bin_dir = self.bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        for name, body in (("herdr", FAKE_HERDR), ("wt", FAKE_WT)):
+            path = bin_dir / name
+            path.write_text(body)
+            path.chmod(0o755)
+        roles = self.root / "roles"
+        roles.mkdir()
+        (roles / "builder.md").write_text(
+            "---\nprefix: b\nkind: pi\nmode: write\nbudget: 45\n---\nYou are a builder.\n")
+        (roles / "reviewer.md").write_text(
+            "---\nprefix: r\nkind: claude\nmodel: opus  # strongest\nmode: read\nbudget: 20\n"
+            "names: zoro, sanji\n---\nYou are a reviewer.\n")
+        self.state = self.root / "state.json"
+        self.log = self.root / "log.jsonl"
+        self.log.write_text("")
+        self.set_state(status="idle")
+        self.env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HERDR_ENV": "1",
+            "FAKE_STATE": str(self.state),
+            "FAKE_LOG": str(self.log),
+            "FAKE_ROOT": str(self.root),
+            "NAKAMA_STATE_DIR": str(self.root / "records"),
+            "NAKAMA_ROLES_DIR": str(self.root / "roles"),
+            "NAKAMA_USER_ROLES_DIR": str(self.root / "userroles"),
+            "NAKAMA_GRACE_SEC": "0",
+            "NAKAMA_POLL_SEC": "0",
+        }
+
+    def set_state(self, **state):
+        self.state.write_text(json.dumps(state))
+
+    def nakama(self, *args, env=None):
+        p = subprocess.run([sys.executable, str(NAKAMA), *args], capture_output=True, text=True,
+                           env=env or self.env, cwd=self.root)
+        return p.returncode, json.loads(p.stdout) if p.stdout.strip() else {}
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def launch(self, *extra):
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", *extra)
+        self.assertEqual(rc, 0, out)
+        return out
+
+    def task(self, out, name="task.md"):
+        path = Path(out["dir"], name)
+        path.write_text("## Goal\nx\n")
+        return path
+
+    def result(self, out):
+        return str(Path(out["dir"], "result.md"))
+
+    def test_name_rule_valid_and_capped(self):
+        rc, out = self.nakama("launch", "builder", "Order Detail: Tip Tracker!! with a very long title", "--kind", "pi")
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out["name"], r"^[a-z][a-z0-9_-]{0,31}$")
+        self.assertTrue(out["name"].startswith("b1-order-detail--tip-tracker"))
+
+    def test_same_slug_gets_next_number(self):
+        self.assertEqual(self.launch()["name"], "b1-order-tip")
+        self.assertEqual(self.launch()["name"], "b2-order-tip")
+
+    def test_launch_applies_push_backstop(self):
+        self.launch()
+        split = next(c for c in self.calls() if c[1:3] == ["pane", "split"])
+        envs = [split[i + 1] for i, value in enumerate(split) if value == "--env"]
+        for expected in ("GIT_SSH_COMMAND=false", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=1",
+                         "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0="):
+            self.assertIn(expected, envs)
+        self.assertTrue(any(e.startswith("GH_CONFIG_DIR=") and len(e) > 14 for e in envs))
+
+    def test_launch_creates_worktree_on_agent_branch(self):
+        out = self.launch()
+        self.assertEqual(out["branch"], "agent/b1-order-tip")
+        self.assertTrue(Path(out["dir"]).is_dir())
+        self.assertIn(["wt", "step", "copy-ignored", "--require-include"], self.calls())
+
+    def test_refuses_outside_herdr(self):
+        rc, out = self.nakama("launch", "builder", "x", "--kind", "pi", env={**self.env, "HERDR_ENV": ""})
+        self.assertEqual(rc, 2)
+        self.assertIn("herdr", out["error"])
+
+    def test_start_failure_reports_blocked_with_screen(self):
+        self.set_state(status="idle", start_rc=1)
+        out = self.launch()
+        self.assertEqual(out["status"], "blocked")
+        self.assertIn("SCREEN", out["screen"])
+
+    def test_joined_reviewer_gets_own_dir(self):
+        builder = self.launch()
+        rc, rev = self.nakama("launch", "reviewer", "order-tip", "--kind", "claude", "--join", builder["name"])
+        self.assertEqual(rc, 0, rev)
+        self.assertEqual(rev["worktree"], builder["worktree"])
+        self.assertNotEqual(rev["dir"], builder["dir"])
+        self.assertIsNone(rev["branch"])
+        self.assertEqual(sum(1 for c in self.calls() if c[:2] == ["wt", "switch"]), 1)
+
+    def test_wait_returns_fresh_result_status(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working", after_wait_status="idle",
+                       write_on_prompt={"path": self.result(out), "text": "Status: succeeded\n## Summary\nok\n"})
+        self.assertEqual(self.nakama("prompt", out["name"], "task.md")[1]["status"], "prompted")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "succeeded")
+
+    def test_stale_result_is_ignored(self):
+        out = self.launch()
+        self.task(out)
+        Path(self.result(out)).write_text("Status: succeeded\n")
+        old = time.time() - 600
+        os.utime(self.result(out), (old, old))
+        self.nakama("prompt", out["name"], "task.md")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "failed")
+
+    def test_result_without_status_line_is_malformed(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": "done!\n"})
+        self.nakama("prompt", out["name"], "task.md")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "malformed")
+
+    def test_nudges_exactly_once_then_fails(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        res = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(res["status"], "failed")
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("result.md", prompts[1][-1])
+
+    def test_round_limit_and_answers_do_not_count(self):
+        out = self.launch()
+        for name in ("fix-1.md", "fix-2.md", "fix-3.md", "fix-4.md"):
+            self.task(out, name)
+        self.assertEqual(self.nakama("prompt", out["name"], "fix-1.md", "--answer")[1]["rounds"], 0)
+        self.assertEqual(self.nakama("prompt", out["name"], "fix-2.md")[1]["rounds"], 1)
+        self.assertEqual(self.nakama("prompt", out["name"], "fix-3.md")[1]["rounds"], 2)
+        res = self.nakama("prompt", out["name"], "fix-4.md")[1]
+        self.assertEqual(res["status"], "round_limit")
+        self.assertEqual(sum(1 for c in self.calls() if c[1:3] == ["agent", "prompt"]), 3)
+
+    def test_prompt_rejects_missing_file(self):
+        out = self.launch()
+        self.assertEqual(self.nakama("prompt", out["name"], "task.md")[0], 2)
+
+    def test_blocked_returns_screen(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="blocked")
+        self.nakama("prompt", out["name"], "task.md")
+        res = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(res["status"], "blocked")
+        self.assertIn("SCREEN", res["screen"])
+
+    def test_over_budget(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        self.nakama("prompt", out["name"], "task.md")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["prompted_at"] -= 46 * 60
+        record.write_text(json.dumps(rec))
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "over_budget")
+
+    def test_extend_refuses_past_ceiling(self):
+        out = self.launch()
+        self.assertEqual(self.nakama("extend", out["name"], "120")[1]["status"], "extended")
+        self.assertEqual(self.nakama("extend", out["name"], "60")[1]["status"], "refused")
+
+    def test_agent_gone_is_failed(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status=None)
+        self.nakama("prompt", out["name"], "task.md")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "failed")
+
+    def test_running_when_timeout_expires(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        self.nakama("prompt", out["name"], "task.md")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
+
+    def test_teardown_closes_pane_and_keeps_worktree_by_default(self):
+        out = self.launch()
+        res = self.nakama("teardown", out["name"])[1]
+        self.assertEqual(res, {"name": out["name"], "status": "closed", "worktree_removed": False})
+        self.assertIn(["herdr", "pane", "close", "w1:p9"], self.calls())
+        self.assertFalse(any(c[:2] == ["wt", "remove"] for c in self.calls()))
+
+    def test_sweep_lists_orphans_and_kills_nothing(self):
+        builder = self.launch()
+        self.set_state(status="idle", agents=[{"name": "r7-stray"}, {"name": "pi-main"}])
+        res = self.nakama("sweep")[1]
+        self.assertEqual(res["stray_agents"], ["r7-stray"])
+        self.assertEqual([r["name"] for r in res["open_records"]], [builder["name"]])
+        self.assertEqual(res["agent_worktrees"], ["agent/b1-old"])
+        self.assertFalse(any(c[1:3] in (["pane", "close"], ["agent", "send-keys"]) for c in self.calls()))
+
+    def start_call(self):
+        return next(c for c in self.calls() if c[1:3] == ["agent", "start"])
+
+    def test_role_defaults_from_frontmatter(self):
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.assertEqual(rc, 0, out)
+        start = self.start_call()
+        self.assertEqual(start[start.index("--kind") + 1], "claude")
+        self.assertEqual(start[start.index("--model") + 1], "opus")
+        self.assertEqual(Path(out["dir"], "persona.md").read_text(), "You are a reviewer.\n")
+        roles = {r["role"]: r for r in self.nakama("roles")[1]["roles"]}
+        self.assertEqual(roles["reviewer"]["names"], ["zoro", "sanji"])
+        self.assertEqual(roles["builder"]["mode"], "write")
+
+    def test_claude_always_gets_an_explicit_permission_mode(self):
+        # A user default of auto mode would otherwise let a read-only role edit files.
+        self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.nakama("launch", "builder", "tip", "--no-worktree", "--kind", "claude")
+        starts = [c for c in self.calls() if c[1:3] == ["agent", "start"]]
+        modes = [s[s.index("--permission-mode") + 1] for s in starts]
+        self.assertEqual(modes, ["default", "acceptEdits"])
+
+    def test_flags_override_frontmatter(self):
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree",
+                              "--kind", "pi", "--model", "x/y", "--budget", "5")
+        self.assertEqual(rc, 0, out)
+        start = self.start_call()
+        self.assertEqual(start[start.index("--kind") + 1], "pi")
+        self.assertEqual(start[start.index("--model") + 1], "x/y")
+        self.assertIn("--tools", start)
+        rec = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
+        self.assertEqual(rec["budget_min"], 5)
+
+    def test_name_pool_then_numbered(self):
+        names = [self.nakama("launch", "reviewer", "tip", "--no-worktree")[1]["name"] for _ in range(3)]
+        self.assertEqual(names, ["zoro-tip", "sanji-tip", "zoro2-tip"])
+
+    def test_explicit_name_validated(self):
+        self.assertEqual(self.nakama("launch", "builder", "x", "--name", "Bad Name")[0], 2)
+        self.assertEqual(self.nakama("launch", "builder", "x", "--name", "kaido")[1]["name"], "kaido")
+        self.assertEqual(self.nakama("launch", "builder", "y", "--name", "kaido")[0], 2)
+
+    def test_unknown_role_refused(self):
+        rc, out = self.nakama("launch", "wizard", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("unknown role", out["error"])
+
+    def test_user_roles_override_bundled(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text("---\nprefix: q\nkind: pi\n---\nMine.\n")
+        (user / "tester.md").write_text("---\nprefix: t\nmode: write\n---\nYou test.\n")
+        roles = {r["role"]: r for r in self.nakama("roles")[1]["roles"]}
+        self.assertEqual(roles["reviewer"]["kind"], "pi")
+        self.assertEqual(roles["reviewer"]["path"], str(user / "reviewer.md"))
+        self.assertEqual(roles["tester"]["mode"], "write")
+        self.assertEqual(roles["builder"]["path"], str(self.root / "roles" / "builder.md"))
+
+    def doctor_env(self, version="0.9.3", ignored=True):
+        home = self.root / "home"
+        (home / ".pi/agent/extensions").mkdir(parents=True)
+        (home / ".pi/agent/extensions/herdr-agent-state.ts").write_text("")
+        if ignored:
+            (home / ".config/git").mkdir(parents=True)
+            (home / ".config/git/ignore").write_text(".DS_Store\n.agent/\n")
+        pi = self.bin_dir / "pi"
+        pi.write_text("#!/bin/sh\nexit 0\n")
+        pi.chmod(0o755)
+        self.set_state(status="idle", version=version)
+        env = {k: v for k, v in self.env.items() if k != "XDG_CONFIG_HOME"}
+        return {**env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+
+    def test_doctor_passes_when_everything_is_present(self):
+        rc, out = self.nakama("doctor", env=self.doctor_env())
+        self.assertEqual(rc, 0)
+        self.assertTrue(out["ok"], out)
+        self.assertNotIn("herdr claude integration", [c["check"] for c in out["checks"]])
+
+    def test_doctor_reports_fixes(self):
+        out = self.nakama("doctor", env=self.doctor_env(version="0.9.2", ignored=False))[1]
+        self.assertFalse(out["ok"])
+        failed = {c["check"]: c["fix"] for c in out["checks"] if not c["ok"]}
+        self.assertIn("herdr", failed["herdr >= 0.9.3"])
+        self.assertIn("echo '.agent/'", failed[".agent/ globally git-ignored"])
+
+    def git(self, repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True).stdout
+
+    def test_init_writes_include_once_and_hides_it(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-q")
+        env = {**self.env, "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        for _ in range(2):
+            p = subprocess.run([sys.executable, str(NAKAMA), "init", "local.properties", "ktlint"],
+                               capture_output=True, text=True, env=env, cwd=repo)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((repo / ".worktreeinclude").read_text(), "local.properties\nktlint\n")
+        self.assertEqual(self.git(repo, "status", "--porcelain"), "")
+
+    def test_install_links_is_idempotent_and_uninstalls(self):
+        home = self.root / "home2"
+        env = {**self.env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        sh = [str(REPO / "install.sh")]
+        first = subprocess.run(sh, capture_output=True, text=True, env=env)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        link = home / ".local/bin/nakama"
+        self.assertEqual(os.readlink(link), str(NAKAMA))
+        self.assertTrue((home / ".claude/skills/nakama-orchestrate").is_symlink())
+        second = subprocess.run(sh, capture_output=True, text=True, env=env)
+        self.assertIn("ok      " + str(link), second.stdout)
+        subprocess.run(sh + ["--uninstall"], capture_output=True, text=True, env=env)
+        self.assertFalse(link.exists() or link.is_symlink())
+
+    def test_install_never_overwrites_foreign_files(self):
+        home = self.root / "home3"
+        (home / ".claude/skills/nakama").mkdir(parents=True)
+        env = {**self.env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
+        p = subprocess.run([str(REPO / "install.sh")], capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("SKIP", p.stderr)
+        self.assertTrue((home / ".claude/skills/nakama").is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()
