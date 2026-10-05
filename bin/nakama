@@ -284,10 +284,15 @@ def cmd_launch(a):
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
+    # Target the caller's own workspace/pane: herdr's defaults follow focus, which may be elsewhere.
     if a.layout == "tab":
-        surface = ["herdr", "tab", "create", "--label", name, "--cwd", worktree, "--no-focus"]
+        workspace = os.environ.get("HERDR_WORKSPACE_ID")
+        surface = ["herdr", "tab", "create", *(["--workspace", workspace] if workspace else []),
+                   "--label", name, "--cwd", worktree, "--no-focus"]
     else:
-        surface = ["herdr", "pane", "split", "--current", "--direction", a.direction, "--cwd", worktree, "--no-focus"]
+        pane = os.environ.get("HERDR_PANE_ID")
+        surface = ["herdr", "pane", "split", *(["--pane", pane] if pane else ["--current"]),
+                   "--direction", a.direction, "--cwd", worktree, "--no-focus"]
     for key, value in worker_env(name).items():
         surface += ["--env", f"{key}={value}"]
     expected = {"pane_id": str}

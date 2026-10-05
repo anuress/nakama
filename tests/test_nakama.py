@@ -88,6 +88,8 @@ class NakamaTest(unittest.TestCase):
         self.env.update({
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "HERDR_ENV": "1",
+            "HERDR_WORKSPACE_ID": "w3",
+            "HERDR_PANE_ID": "w3:p1",
             "FAKE_STATE": str(self.state),
             "FAKE_LOG": str(self.log),
             "FAKE_ROOT": str(self.root),
@@ -160,6 +162,7 @@ class NakamaTest(unittest.TestCase):
         tab = next(c for c in self.calls() if c[1:3] == ["tab", "create"])
         self.assertEqual(tab[tab.index("--label") + 1], out["name"])
         self.assertIn("--no-focus", tab)
+        self.assertEqual(tab[tab.index("--workspace") + 1], "w3")
         self.assert_backstop(tab)
         self.assertEqual(out["pane"], "w1:p8")
         self.assertFalse(any(c[1:3] == ["pane", "split"] for c in self.calls()))
@@ -189,7 +192,9 @@ class NakamaTest(unittest.TestCase):
 
     def test_split_layout_splits_with_push_backstop(self):
         out = self.launch("--layout", "split")
-        self.assert_backstop(next(c for c in self.calls() if c[1:3] == ["pane", "split"]))
+        split = next(c for c in self.calls() if c[1:3] == ["pane", "split"])
+        self.assertEqual(split[split.index("--pane") + 1], "w3:p1")
+        self.assert_backstop(split)
         self.assertEqual(out["pane"], "w1:p9")
 
     def test_launch_creates_worktree_on_agent_branch(self):
