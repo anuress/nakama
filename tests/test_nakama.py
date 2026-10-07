@@ -128,10 +128,67 @@ class NakamaTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(NAKAMA), *args, "--help"],
                               capture_output=True, text=True).stdout
 
+    def msg(self, text="hi"):
+        path = self.root / "msg.md"
+        path.write_text(text)
+        return str(path)
+
+    def test_worker_message_wakes_orchestrator_wait(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        rc, sent = self.nakama("send", "orchestrator", "ask", self.msg("pick A or B?"), env=worker)
+        self.assertEqual((rc, sent["status"]), (0, "sent"))
+        _, waited = self.nakama("wait", out["name"], "--timeout", "1")
+        self.assertEqual(waited["status"], "message")
+        _, box = self.nakama("inbox")
+        self.assertEqual([(m["from"], m["kind"], m["text"]) for m in box["messages"]],
+                         [(out["name"], "ask", "pick A or B?")])
+        self.assertEqual(self.nakama("inbox")[1]["messages"], [])
+        self.assertNotEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "message")
+
+    def test_worker_needs_peers_to_message_a_peer(self):
+        a, b = self.launch(), self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": a["name"]}
+        rc, err = self.nakama("send", b["name"], "info", self.msg(), env=worker)
+        self.assertEqual(rc, 2)
+        self.assertIn("peers", err["error"])
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "builder.md").write_text("---\nprefix: b\nkind: pi\nmode: write\npeers: true\n---\nB.\n")
+        self.assertEqual(self.nakama("send", b["name"], "info", self.msg(), env=worker)[0], 0)
+        _, box = self.nakama("inbox", b["name"])
+        self.assertEqual(box["messages"][0]["from"], a["name"])
+
+    def test_send_pushes_pointer_into_working_worker(self):
+        out = self.launch()
+        self.set_state(status="working")
+        rc, sent = self.nakama("send", out["name"], "info", self.msg("use B, not A"))
+        self.assertEqual((rc, sent["pushed"]), (0, True))
+        push = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertEqual(push[3], out["name"])
+        self.assertIn(".agent/" + out["name"] + "/inbox/", push[4])
+        self.assertIn("overrides task.md", push[4])
+        _, box = self.nakama("inbox", out["name"])
+        self.assertEqual(box["messages"][0]["text"], "use B, not A")
+
+    def test_send_does_not_push_when_agent_gone_or_to_orchestrator(self):
+        out = self.launch()
+        self.set_state(status=None)
+        self.assertFalse(self.nakama("send", out["name"], "info", self.msg())[1]["pushed"])
+        self.set_state(status="idle")
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        self.assertFalse(self.nakama("send", "orchestrator", "done", self.msg(), env=worker)[1]["pushed"])
+        self.assertFalse(any(c[1:3] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_send_to_unknown_agent_fails(self):
+        self.assertEqual(self.nakama("send", "nobody", "info", self.msg())[0], 2)
+
     def test_help_describes_every_command(self):
         text = self.help_text()
         self.assertNotIn("{launch,", text)
-        for command in ("launch", "prompt", "wait", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
+        for command in ("launch", "prompt", "wait", "send", "inbox", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
             line = next((l for l in text.splitlines() if l.strip().startswith(command + " ")), "")
             self.assertTrue(line.split(command, 1)[1].strip(), f"no description for {command}")
 

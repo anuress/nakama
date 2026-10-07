@@ -18,6 +18,7 @@ mode: read           # read | write (tool limits and Claude permission flags)
 budget: 20           # minutes
 names: zoro, sanji   # optional pool: zoro-<slug>, sanji-<slug>, then zoro2-<slug>
 spawns: true         # optional: this role may run `nakama launch` itself (sub-orchestrator); off by default
+peers: true          # optional: this role may `nakama send` to peers, not only the orchestrator; off by default
 ---
 You are a reviewer: ...
 ```
@@ -33,6 +34,8 @@ You are a reviewer: ...
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
 | `nakama wait <name>` | returns within ~5 min; on `running`, call it again. Claude orchestrators: give the Bash tool a timeout above 300000 ms (or pass `--timeout 100`) |
+| `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer). kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy` |
+| `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Default: yourself |
 | `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
 | `nakama teardown <name> [--remove-worktree]` | close the pane; the worktree stays unless the flag is given |
 | `nakama list`, `nakama sweep` | open agents / orphans. sweep never kills; ask the user first |
@@ -47,6 +50,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 | malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
 | blocked | show `screen` to the user; never answer it yourself (one exception below) |
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
+| message | a worker sent mail: run `nakama inbox`, act (answer an `ask` with `nakama send <name> answer <file>`), then `nakama wait` again. Unread mail makes every wait return at once |
 | running | call `nakama wait` again |
 
 The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.

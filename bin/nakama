@@ -30,6 +30,9 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # Agent-side dialogs herdr does not classify as blocked (pi extensions such as a security scanner).
 PROMPT_MARKERS = ("Allow execution?",)
 CHECK_SEC = 30
+ORCH = "orchestrator"
+MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
+MAX_INBOX = 20
 STATUS_RE = re.compile(r"^Status:\s*(succeeded|partial|failed|needs_input)\b", re.M)
 
 # Set from the probe results (plan Tasks 1-3).
@@ -40,10 +43,11 @@ PI_READ_TOOLS = "read,bash,grep,find,ls,write"
 # Project-specific commands (build tools) belong in that repo's .claude/settings.local.json.
 CLAUDE_FLAGS = {
     "write": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(git status:*)", "Bash(git diff:*)",
-              "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(mkdir:*)"],
+              "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(mkdir:*)",
+              "Bash(nakama send:*)", "Bash(nakama inbox:*)"],
     "read": ["--permission-mode", "default", "--allowedTools", "Bash(git diff:*)", "Bash(git log:*)",
              "Bash(git show:*)", "Bash(git status:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
-             "Edit(.agent/**)"],
+             "Edit(.agent/**)", "Bash(nakama send:*)", "Bash(nakama inbox:*)"],
 }
 
 
@@ -123,6 +127,7 @@ def load_role(role):
         "budget": budget,
         "names": [unquote(n.strip()) for n in names.split(",") if n.strip()],
         "spawns": meta.get("spawns", "").lower() in ("true", "yes"),
+        "peers": meta.get("peers", "").lower() in ("true", "yes"),
         "path": str(path),
         "body": body.lstrip(),
     }
@@ -339,6 +344,7 @@ def cmd_wait(a):
     if not rec.get("prompted_at"):
         emit({"error": f"{rec['name']} was never prompted"}, 2)
     deadline = time.time() + a.timeout
+    me = os.environ.get("NAKAMA_AGENT", ORCH)
 
     def done(status, **extra):
         emit({"name": rec["name"], "status": status, "rounds": rec["rounds"],
@@ -350,6 +356,9 @@ def cmd_wait(a):
         # A fresh result counts only once the agent has settled: it may still commit or rewrite it.
         if status and state in ("idle", "done", None):
             done(status)
+        # Unread mail makes every wait return at once: read it with nakama inbox.
+        if mail := unread(me):
+            done("message", messages=[str(f) for f in mail])
         if state is None:
             done("failed", reason="agent or pane gone")
         if state == "blocked":
@@ -380,6 +389,57 @@ def cmd_wait(a):
             ms = int(max(min(remaining, CHECK_SEC) * 1000, 3000))
             run(["herdr", "agent", "wait", rec["name"], "--timeout", str(ms)], check=False)
         time.sleep(POLL_SEC)
+
+
+def inbox_dir(name):
+    """The orchestrator's inbox is shared state; a worker's lives in its own .agent dir."""
+    if name == ORCH:
+        return STATE_DIR / "inbox" / ORCH
+    return agent_dir(load(name)) / "inbox" if record_path(name).is_file() else None
+
+
+def unread(name):
+    box = inbox_dir(name)
+    return sorted(box.glob("*.md")) if box and box.is_dir() else []
+
+
+def cmd_send(a):
+    sender = os.environ.get("NAKAMA_AGENT", ORCH)
+    src = Path(a.file)
+    if not src.is_file():
+        emit({"error": f"{src} does not exist"}, 2)
+    box = inbox_dir(a.to)
+    if box is None or a.to == sender:
+        emit({"error": f"no agent {a.to} to message (or it is you)"}, 2)
+    # Workers report to the orchestrator; talking to a peer needs the role's 'peers: true'.
+    if sender != ORCH and a.to != ORCH:
+        role = load(sender)["role"] if record_path(sender).is_file() else None
+        if not (role and load_role(role)["peers"]):
+            emit({"error": f"agent {sender} may only message {ORCH}: its role needs 'peers: true'"}, 2)
+    box.mkdir(parents=True, exist_ok=True)
+    # File names are <ns>.<sender>.<kind>.md|read; agent names never contain a dot.
+    if sum(1 for f in box.iterdir() if f.name.split(".")[1] == sender) >= MAX_INBOX:
+        emit({"to": a.to, "status": "inbox_full", "limit": MAX_INBOX})
+    dest = box / f"{time.time_ns()}.{sender}.{a.kind}.md"
+    dest.write_text(src.read_text())
+    pushed = False
+    # herdr hands a prompt to a working agent too (probed on pi): the pointer reaches it mid-task.
+    if a.to != ORCH and agent_status(a.to) is not None:
+        rel = dest.relative_to(load(a.to)["worktree"])
+        text = f"Message from {sender} ({a.kind}): read {rel} and act on it. It overrides task.md where they conflict."
+        pushed = run(["herdr", "agent", "prompt", a.to, text], check=False).returncode == 0
+    emit({"to": a.to, "from": sender, "kind": a.kind, "status": "sent", "file": str(dest), "pushed": pushed})
+
+
+def cmd_inbox(a):
+    me = a.name or os.environ.get("NAKAMA_AGENT", ORCH)
+    messages = []
+    for f in unread(me):
+        _, sender, kind, _ = f.name.split(".")
+        messages.append({"from": sender, "kind": kind, "file": str(f), "text": f.read_text()})
+        if not a.peek:
+            f.rename(f.with_suffix(".read"))
+    emit({"name": me, "messages": messages})
 
 
 def cmd_extend(a):
@@ -546,10 +606,24 @@ def main():
     s.add_argument("--answer", action="store_true", help="answer to needs_input; does not count as a round")
 
     s = sub.add_parser("wait", help="wait for a worker's result",
-                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/over_budget, "
+                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/over_budget/message, "
                                    "or running when --timeout passes (call it again).")
     s.add_argument("name", help="agent name")
     s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")
+
+    s = sub.add_parser("send", help="message another agent or the orchestrator",
+                       description="Drop a message file in the recipient's inbox. The orchestrator's nakama wait "
+                                   "returns 'message'; a worker reads it with nakama inbox. Workers may only "
+                                   "message the orchestrator unless their role has 'peers: true'.")
+    s.add_argument("to", help=f"agent name, or '{ORCH}'")
+    s.add_argument("kind", choices=MESSAGE_KINDS, help="done: finished; ask: need a judgement; answer; info; blocker")
+    s.add_argument("file", help="markdown file holding the message")
+
+    s = sub.add_parser("inbox", help="read and clear unread messages",
+                       description="Print unread messages for you (default: $NAKAMA_AGENT, else the orchestrator) "
+                                   "and mark them read.")
+    s.add_argument("name", nargs="?", help="agent name (default: yourself)")
+    s.add_argument("--peek", action="store_true", help="do not mark messages read")
 
     s = sub.add_parser("extend", help="add minutes to a worker's time budget (max 180 in total)")
     s.add_argument("name", help="agent name")
@@ -567,7 +641,7 @@ def main():
                        description="Gitignored files new worktrees need (e.g. .env), copied in by 'wt step copy-ignored'.")
     s.add_argument("patterns", nargs="+", help="gitignore-style patterns")
     a = p.parse_args()
-    {"launch": cmd_launch, "prompt": cmd_prompt, "wait": cmd_wait, "extend": cmd_extend,
+    {"launch": cmd_launch, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
      "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
      "doctor": cmd_doctor, "init": cmd_init}[a.cmd](a)
 
