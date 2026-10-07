@@ -2,11 +2,11 @@ class Nakama < Formula
   desc "Run a crew of coding agents in herdr panes, one git worktree each"
   homepage "https://github.com/anuress/nakama"
   # SSH URL: the repo is private. Switch to an https tarball + sha256 if it goes public.
-  url "git@github.com:anuress/nakama.git",
+  url "ssh://git@github.com/anuress/nakama.git",
       tag:      "v0.1.0",
       revision: "65ec8ba1a6541c3e870e9546ceac7c8a808cd77c"
   license "MIT"
-  head "git@github.com:anuress/nakama.git", branch: "master"
+  head "ssh://git@github.com/anuress/nakama.git", branch: "master"
 
   depends_on "herdr"
   depends_on "worktrunk"
