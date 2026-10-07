@@ -55,8 +55,20 @@ CLI.
 
 ## Install
 
+With Homebrew. The formula lives in this repo, so the tap needs the explicit URL
+(SSH while the repo is private):
+
 ```bash
-git clone https://github.com/<you>/nakama ~/.local/share/nakama
+brew tap anuress/nakama git@github.com:anuress/nakama.git
+brew install nakama
+$(brew --prefix nakama)/libexec/install.sh --skills-only   # link skills into your agents
+brew upgrade nakama                                         # later; skill links follow
+```
+
+Or from a clone:
+
+```bash
+git clone https://github.com/anuress/nakama ~/.local/share/nakama
 ~/.local/share/nakama/install.sh     # symlinks + nakama doctor
 ```
 
@@ -120,3 +132,9 @@ are unchanged.
 
 `python3 tests/test_nakama.py` runs against fake `herdr` and `wt` binaries, so
 no herdr session is needed.
+
+## Releasing
+
+Bump `VERSION` in `bin/nakama`, commit, `git tag -a vX.Y.Z -m "nakama X.Y.Z"`, and
+push both. Then set `tag:` and `revision:` in `Formula/nakama.rb`
+(`git rev-parse vX.Y.Z^{commit}` prints the revision) and push that commit too.
