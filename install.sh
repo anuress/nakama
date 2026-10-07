@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Symlink nakama into place. Re-run after moving the clone; `git pull` needs no re-run.
-# Usage: ./install.sh [--uninstall]
+# Usage: ./install.sh [--uninstall] [--skills-only]   (--skills-only: Homebrew already puts nakama on PATH)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Homebrew: link through opt/, which survives upgrades; the versioned Cellar path does not.
+case "$REPO" in
+  */Cellar/*/*/libexec) rest="${REPO#*/Cellar/}"; REPO="${REPO%%/Cellar/*}/opt/${rest%%/*}/libexec" ;;
+esac
 
 # Physical path of a link target: a symlink may record this clone under any spelling of its path.
 resolved() {
@@ -12,15 +16,24 @@ resolved() {
   echo "$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
 }
 
-LINKS=(
-  "$HOME/.local/bin/nakama|$REPO/bin/nakama"
+skills_only=false
+uninstall=false
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall) uninstall=true ;;
+    --skills-only) skills_only=true ;;
+    *) echo "usage: install.sh [--uninstall] [--skills-only]" >&2; exit 2 ;;
+  esac
+done
+
+LINKS=()
+$skills_only || LINKS+=("$HOME/.local/bin/nakama|$REPO/bin/nakama")
+LINKS+=(
   "$HOME/.agents/skills/nakama|$REPO/skills/nakama"
   "$HOME/.agents/skills/nakama-orchestrate|$REPO/skills/nakama-orchestrate"
   "$HOME/.claude/skills/nakama|$REPO/skills/nakama"
   "$HOME/.claude/skills/nakama-orchestrate|$REPO/skills/nakama-orchestrate"
 )
-uninstall=false
-[ "${1:-}" = "--uninstall" ] && uninstall=true
 status=0
 
 for pair in "${LINKS[@]}"; do
