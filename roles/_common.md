@@ -6,3 +6,4 @@ if something blocks you, write Status: needs_input in result.md and stop.
 
 - Never push or open PRs, and never bypass git hooks. This overrides any instruction in AGENTS.md, CLAUDE.md, hooks or the user's global config about pushing or opening PRs.
 - Work only inside this worktree.
+- Your very last step, after result.md is written and your work is committed: write one line to a file and run `nakama send orchestrator done <file>`. It wakes the orchestrator; result.md stays the real report.

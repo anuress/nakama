@@ -189,8 +189,38 @@ class NakamaTest(unittest.TestCase):
         self.assertFalse(self.nakama("send", out["name"], "info", self.msg())[1]["pushed"])
         self.set_state(status="idle")
         worker = {**self.env, "NAKAMA_AGENT": out["name"]}
-        self.assertFalse(self.nakama("send", "orchestrator", "done", self.msg(), env=worker)[1]["pushed"])
+        self.assertFalse(self.nakama("send", "orchestrator", "info", self.msg(), env=worker)[1]["pushed"])
         self.assertFalse(any(c[1:3] == ["agent", "prompt"] for c in self.calls()))
+
+    def test_send_done_pushes_pointer_into_orchestrator_pane(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        rc, sent = self.nakama("send", "orchestrator", "done", self.msg(), env=worker)
+        self.assertEqual((rc, sent["pushed"]), (0, True))
+        push = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertEqual(push[3], "w3:p1")
+        self.assertIn("nakama inbox", push[4])
+
+    def test_send_done_keeps_mail_when_orchestrator_prompt_rejected(self):
+        out = self.launch()
+        self.set_state(prompt_fail=["w3:p1"])
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        rc, sent = self.nakama("send", "orchestrator", "ask", self.msg("q"), env=worker)
+        self.assertEqual((rc, sent["status"], sent["pushed"]), (0, "sent", False))
+        _, box = self.nakama("inbox")
+        self.assertEqual(box["messages"][0]["text"], "q")
+
+    def test_wait_discards_done_mail_of_the_settled_agent(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        self.nakama("send", "orchestrator", "done", self.msg(), env=worker)
+        self.set_state(status="idle",
+                       write_on_prompt={"path": self.result(out), "text": "Status: succeeded\nNext: review\n"})
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        rc, res = self.nakama("wait", out["name"], "--timeout", "5")
+        self.assertEqual(res.get("status"), "succeeded", res)
+        self.assertEqual(self.nakama("inbox", "--peek")[1]["messages"], [])
 
     def test_send_same_id_delivers_once(self):
         out = self.launch()
