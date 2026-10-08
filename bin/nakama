@@ -33,6 +33,7 @@ CHECK_SEC = 30
 ORCH = "orchestrator"
 MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
 MAX_INBOX = 20
+SEND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 STATUS_RE = re.compile(r"^Status:\s*(succeeded|partial|failed|needs_input)\b", re.M)
 NEXT_RE = re.compile(r"^Next:\s*(\S+)\s*$", re.M)
 NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
@@ -423,9 +424,9 @@ def unread(name):
 
 def cmd_send(a):
     sender = os.environ.get("NAKAMA_AGENT", ORCH)
+    if a.id is not None and not SEND_ID_RE.fullmatch(a.id):
+        emit({"error": "--id must contain 1-64 letters, numbers, underscores, or hyphens"}, 2)
     src = Path(a.file)
-    if not src.is_file():
-        emit({"error": f"{src} does not exist"}, 2)
     box = inbox_dir(a.to)
     if box is None or a.to == sender:
         emit({"error": f"no agent {a.to} to message (or it is you)"}, 2)
@@ -435,11 +436,20 @@ def cmd_send(a):
         if not (role and load_role(role)["peers"]):
             emit({"error": f"agent {sender} may only message {ORCH}: its role needs 'peers: true'"}, 2)
     box.mkdir(parents=True, exist_ok=True)
+    id_file = box / ".ids" / f"{sender}.{a.id}" if a.id is not None else None
+    if id_file is not None and id_file.is_file():
+        emit({"to": a.to, "from": sender, "status": "duplicate", "id": a.id})
+    if not src.is_file():
+        emit({"error": f"{src} does not exist"}, 2)
     # File names are <ns>.<sender>.<kind>.md|read; agent names never contain a dot.
-    if sum(1 for f in box.iterdir() if f.name.split(".")[1] == sender) >= MAX_INBOX:
+    if sum(1 for f in box.glob("*.md") if f.is_file() and f.name.split(".")[1] == sender) >= MAX_INBOX:
         emit({"to": a.to, "status": "inbox_full", "limit": MAX_INBOX})
     dest = box / f"{time.time_ns()}.{sender}.{a.kind}.md"
     dest.write_text(src.read_text())
+    if id_file is not None:
+        # ponytail: a crash before recording the id may duplicate on retry, but cannot lose the written message.
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.touch()
     pushed = False
     # herdr hands a prompt to a working agent too (probed on pi): the pointer reaches it mid-task.
     if a.to != ORCH and agent_status(a.to) is not None:
@@ -630,12 +640,14 @@ def main():
     s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")
 
     s = sub.add_parser("send", help="message another agent or the orchestrator",
-                       description="Drop a message file in the recipient's inbox. The orchestrator's nakama wait "
+                       description="Drop a message file in the recipient's inbox. Optional --id KEY makes retries "
+                                   "idempotent for that sender and recipient. The orchestrator's nakama wait "
                                    "returns 'message'; a worker reads it with nakama inbox. Workers may only "
                                    "message the orchestrator unless their role has 'peers: true'.")
     s.add_argument("to", help=f"agent name, or '{ORCH}'")
     s.add_argument("kind", choices=MESSAGE_KINDS, help="done: finished; ask: need a judgement; answer; info; blocker")
     s.add_argument("file", help="markdown file holding the message")
+    s.add_argument("--id", help="optional idempotency key (1-64 letters, numbers, underscores, or hyphens)")
 
     s = sub.add_parser("inbox", help="read and clear unread messages",
                        description="Print unread messages for you (default: $NAKAMA_AGENT, else the orchestrator) "

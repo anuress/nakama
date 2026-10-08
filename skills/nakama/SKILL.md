@@ -34,7 +34,7 @@ You are a reviewer: ...
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
 | `nakama wait <name>` | returns within ~5 min; on `running`, call it again. Claude orchestrators: give the Bash tool a timeout above 300000 ms (or pass `--timeout 100`) |
-| `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer). kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy` |
+| `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer); optional `--id KEY` makes retries idempotent. kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy` |
 | `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Default: yourself |
 | `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
 | `nakama teardown <name> [--remove-worktree]` | close the pane; the worktree stays unless the flag is given |

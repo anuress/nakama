@@ -182,6 +182,72 @@ class NakamaTest(unittest.TestCase):
         self.assertFalse(self.nakama("send", "orchestrator", "done", self.msg(), env=worker)[1]["pushed"])
         self.assertFalse(any(c[1:3] == ["agent", "prompt"] for c in self.calls()))
 
+    def test_send_same_id_delivers_once(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        args = ("send", "orchestrator", "info", self.msg("once"), "--id", "retry_1")
+        self.assertEqual(self.nakama(*args, env=worker)[1]["status"], "sent")
+        rc, duplicate = self.nakama(*args, env=worker)
+        self.assertEqual(rc, 0)
+        self.assertEqual(duplicate, {"to": "orchestrator", "from": out["name"],
+                                     "status": "duplicate", "id": "retry_1"})
+        _, inbox = self.nakama("inbox")
+        self.assertEqual([m["text"] for m in inbox["messages"]], ["once"])
+
+    def test_send_different_ids_both_deliver(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        for key in ("first", "second"):
+            rc, sent = self.nakama("send", "orchestrator", "info", self.msg(key), "--id", key, env=worker)
+            self.assertEqual((rc, sent["status"]), (0, "sent"))
+        _, inbox = self.nakama("inbox", "--peek")
+        self.assertEqual([m["text"] for m in inbox["messages"]], ["first", "second"])
+
+    def test_send_without_id_behaves_as_before(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        rc, sent = self.nakama("send", "orchestrator", "info", self.msg("ordinary"), env=worker)
+        self.assertEqual((rc, sent["status"]), (0, "sent"))
+        self.assertNotIn("id", sent)
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        self.assertFalse((box / ".ids").exists())
+        _, inbox = self.nakama("inbox")
+        self.assertEqual([m["text"] for m in inbox["messages"]], ["ordinary"])
+
+    def test_send_rejects_invalid_id(self):
+        rc, out = self.nakama("send", "orchestrator", "info", self.msg(), "--id", "bad.key")
+        self.assertEqual(rc, 2)
+        self.assertIn("--id", out["error"])
+
+    def test_inbox_leaves_id_sidecar_untouched(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        self.nakama("send", "orchestrator", "info", self.msg("keep sidecar"), "--id", "stable", env=worker)
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        id_file = box / ".ids" / f"{out['name']}.stable"
+        self.assertTrue(id_file.is_file())
+        _, inbox = self.nakama("inbox")
+        self.assertEqual([m["text"] for m in inbox["messages"]], ["keep sidecar"])
+        self.assertTrue(id_file.is_file())
+        self.assertEqual(self.nakama("inbox")[1]["messages"], [])
+        self.assertTrue(id_file.is_file())
+
+    def test_inbox_full_does_not_record_id(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box.mkdir(parents=True, exist_ok=True)
+        for i in range(20):
+            (box / f"{i}.{out['name']}.info.md").write_text("full")
+        rc, full = self.nakama("send", "orchestrator", "info", self.msg(), "--id", "later", env=worker)
+        self.assertEqual((rc, full["status"]), (0, "inbox_full"))
+        id_file = box / ".ids" / f"{out['name']}.later"
+        self.assertFalse(id_file.exists())
+        (box / f"0.{out['name']}.info.md").unlink()
+        rc, sent = self.nakama("send", "orchestrator", "info", self.msg("retry"), "--id", "later", env=worker)
+        self.assertEqual((rc, sent["status"]), (0, "sent"))
+        self.assertTrue(id_file.is_file())
+
     def test_send_to_unknown_agent_fails(self):
         self.assertEqual(self.nakama("send", "nobody", "info", self.msg())[0], 2)
 
