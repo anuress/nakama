@@ -34,6 +34,8 @@ ORCH = "orchestrator"
 MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
 MAX_INBOX = 20
 STATUS_RE = re.compile(r"^Status:\s*(succeeded|partial|failed|needs_input)\b", re.M)
+NEXT_RE = re.compile(r"^Next:\s*(\S+)\s*$", re.M)
+NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
 
 # Set from the probe results (plan Tasks 1-3).
 WT_PATH_KEY = "path"
@@ -238,12 +240,15 @@ def screen(name):
     return p.stdout if p.returncode == 0 else visible(name)
 
 
-def fresh_status(rec):
+def fresh_result(rec):
     result = agent_dir(rec) / "result.md"
     if not rec.get("prompted_at") or not result.is_file() or result.stat().st_mtime <= rec["prompted_at"]:
-        return None
-    match = STATUS_RE.search(result.read_text())
-    return match.group(1) if match else "malformed"
+        return None, None
+    text = result.read_text()
+    status_match = STATUS_RE.search(text)
+    next_match = NEXT_RE.search(text)
+    next_hop = next_match.group(1) if next_match and next_match.group(1) in NEXT_HOPS else None
+    return (status_match.group(1) if status_match else "malformed"), next_hop
 
 
 def over_budget(rec):
@@ -360,10 +365,15 @@ def cmd_wait(a):
 
     while True:
         state = agent_status(rec["name"])
-        status = fresh_status(rec)
+        status, next_hop = fresh_result(rec)
         # A fresh result counts only once the agent has settled: it may still commit or rewrite it.
         if status and state in ("idle", "done", None):
-            done(status)
+            extra = {}
+            if next_hop:
+                extra["next"] = next_hop
+            if status == "succeeded" and not next_hop:
+                extra["warnings"] = ["no_next_hop"]
+            done(status, **extra)
         # Unread mail makes every wait return at once: read it with nakama inbox.
         if mail := unread(me):
             done("message", messages=[str(f) for f in mail])

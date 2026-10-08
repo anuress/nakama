@@ -289,6 +289,33 @@ class NakamaTest(unittest.TestCase):
         self.set_state(status="working", after_wait_status="idle")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "succeeded")
 
+    def wait_with_result(self, text):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": text})
+        self.nakama("prompt", out["name"], "task.md")
+        return self.nakama("wait", out["name"], "--timeout", "5")[1]
+
+    def test_wait_returns_valid_next_hop(self):
+        result = self.wait_with_result("Status: succeeded\nNext: review\n")
+        self.assertEqual((result["status"], result["next"]), ("succeeded", "review"))
+        self.assertNotIn("warnings", result)
+
+    def test_succeeded_without_next_hop_warns(self):
+        result = self.wait_with_result("Status: succeeded\n")
+        self.assertEqual(result["warnings"], ["no_next_hop"])
+        self.assertNotIn("next", result)
+
+    def test_unknown_next_hop_warns(self):
+        result = self.wait_with_result("Status: succeeded\nNext: unknown\n")
+        self.assertEqual(result["warnings"], ["no_next_hop"])
+        self.assertNotIn("next", result)
+
+    def test_failed_without_next_hop_has_no_warning(self):
+        result = self.wait_with_result("Status: failed\n")
+        self.assertEqual(result["status"], "failed")
+        self.assertNotIn("warnings", result)
+
     def test_fresh_result_counts_only_once_the_agent_settles(self):
         # An agent may write result.md and keep working (commit, rewrite it); that is not done yet.
         out = self.launch()

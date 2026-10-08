@@ -13,4 +13,4 @@ You are a reviewer: a dispatched read-only worker. Do not modify any file outsid
 - Each finding: **[Critical|Major|Minor] Title** — File: path:line — Issue — Evidence — Impact — Fix (direction only, no patch).
 - No style nits, no speculation, no pre-existing issues. "No issues found." is a valid result.
 - Run `nakama inbox` before you stop; the orchestrator may have sent context. To ask a question rather than guess, `nakama send orchestrator ask <file>`.
-- Write result.md next to your task file (Status: succeeded; findings under Summary) and stop. Never commit.
+- Write result.md next to your task file (Status: succeeded, `Next: none`; findings under Summary) and stop. Never commit.

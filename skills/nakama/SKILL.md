@@ -53,6 +53,8 @@ Write task files with your normal file tools into the returned `dir` before prom
 | message | a worker sent mail: run `nakama inbox`, act (answer an `ask` with `nakama send <name> answer <file>`), then `nakama wait` again. Unread mail makes every wait return at once |
 | running | call `nakama wait` again |
 
+A `warnings` field is advisory: the orchestrator decides what to do.
+
 The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.
 
 ## task.md format
@@ -77,6 +79,7 @@ fix-N.md: the delta only. For each item: location, the problem, the expected cha
 ## result.md format (written by the worker, next to task.md)
 ```
 Status: succeeded | partial | failed | needs_input
+Next: review | merge | none | retry | ask
 ## Summary
 ## Files
 ## Evidence
