@@ -3,8 +3,8 @@ class Nakama < Formula
   homepage "https://github.com/anuress/nakama"
   # SSH URL: the repo is private. Switch to an https tarball + sha256 if it goes public.
   url "ssh://git@github.com/anuress/nakama.git",
-      tag:      "v0.1.0",
-      revision: "65ec8ba1a6541c3e870e9546ceac7c8a808cd77c"
+      tag:      "v0.1.1",
+      revision: "03c53b6df80a78890698c6ac5d3dfbdd972d65ed"
   license "MIT"
   head "ssh://git@github.com/anuress/nakama.git", branch: "master"
 
