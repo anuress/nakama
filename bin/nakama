@@ -318,6 +318,14 @@ def start_worker(rec, meta, layout="tab", direction="right"):
                 "--timeout", "60000", "--", *agent_args(rec, meta)], check=False)
 
 
+def launcher_orch_pane():
+    """The orchestrator inbox is global: a worker launched by a worker inherits the root orchestrator's pane."""
+    parent = os.environ.get("NAKAMA_AGENT")
+    if parent and record_path(parent).is_file():
+        return load(parent).get("orch_pane")
+    return os.environ.get("HERDR_PANE_ID")
+
+
 def cmd_launch(a):
     require_herdr()
     check_parent_permission()
@@ -344,7 +352,7 @@ def cmd_launch(a):
         "direction": a.direction, "worktree": worktree, "branch": branch,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
         "nudged_at": None, "screen_sig": None, "screen_changed_at": None,
-        "rounds": 0, "closed": False, "orch_pane": os.environ.get("HERDR_PANE_ID"),
+        "rounds": 0, "closed": False, "orch_pane": launcher_orch_pane(),
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
     started = start_worker(rec, meta, a.layout, a.direction)

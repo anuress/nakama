@@ -201,6 +201,19 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(push[3], "w3:p1")
         self.assertIn("nakama inbox", push[4])
 
+    def test_worker_launched_by_worker_pokes_root_orchestrator_pane(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "lead.md").write_text("---\nprefix: l\nmode: write\nspawns: true\n---\nYou lead.\n")
+        parent = self.nakama("launch", "lead", "epic")[1]
+        child_env = {**self.env, "NAKAMA_AGENT": parent["name"], "HERDR_PANE_ID": "w3:p77"}
+        rc, child = self.nakama("launch", "builder", "Child", "--kind", "pi", env=child_env)
+        self.assertEqual(rc, 0, child)
+        worker = {**self.env, "NAKAMA_AGENT": child["name"]}
+        self.nakama("send", "orchestrator", "done", self.msg(), env=worker)
+        push = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertEqual(push[3], "w3:p1")
+
     def test_send_done_keeps_mail_when_orchestrator_prompt_rejected(self):
         out = self.launch()
         self.set_state(prompt_fail=["w3:p1"])
