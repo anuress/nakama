@@ -903,6 +903,19 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertTrue(result["forced"])
         self.assertIn(["wt", "remove", "agent/b2-order-tip", "--yes", "--force"], self.calls())
 
+    def test_teardown_joined_reviewer_force_reports_no_owned_worktree(self):
+        builder = self.launch()
+        rc, reviewer = self.nakama("launch", "reviewer", "review", "--join", builder["name"])
+        self.assertEqual(rc, 0, reviewer)
+        rc, result = self.nakama("teardown", reviewer["name"], "--remove-worktree", "--force")
+        self.assertEqual(rc, 0)
+        self.assertFalse(result["worktree_removed"])
+        self.assertEqual(result["reason"], "no worktree owned by this agent")
+        self.assertNotIn("forced", result)
+        self.assertFalse(any(c[:2] == ["wt", "remove"] for c in self.calls()))
+        record = json.loads((self.root / "records" / f"{reviewer['name']}.json").read_text())
+        self.assertTrue(record["closed"])
+
     def test_teardown_force_without_remove_worktree_does_nothing(self):
         out = self.launch()
         rc, result = self.nakama("teardown", out["name"], "--force")

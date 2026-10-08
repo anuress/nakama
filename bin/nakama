@@ -586,20 +586,25 @@ def cmd_teardown(a):
     close_worker_surface(rec)
     removed = False
     reason = None
-    if a.remove_worktree and rec["branch"]:
-        cmd = ["wt", "remove", rec["branch"], "--yes"]
-        if a.force:
-            cmd.append("--force")
-        result = run(cmd, check=False)
-        removed = result.returncode == 0
-        if not removed:
-            reason = (result.stderr + result.stdout)[-300:].strip()
+    forced = False
+    if a.remove_worktree:
+        if rec["branch"]:
+            cmd = ["wt", "remove", rec["branch"], "--yes"]
+            if a.force:
+                cmd.append("--force")
+                forced = True
+            result = run(cmd, check=False)
+            removed = result.returncode == 0
+            if not removed:
+                reason = (result.stderr + result.stdout)[-300:].strip()
+        else:
+            reason = "no worktree owned by this agent"
     rec["closed"] = True
     save(rec)
     out = {"name": rec["name"], "status": "closed", "worktree_removed": removed}
     if reason is not None:
         out["reason"] = reason
-    if a.force:
+    if forced:
         out["forced"] = True
     emit(out)
 
