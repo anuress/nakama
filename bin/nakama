@@ -442,12 +442,13 @@ def cmd_send(a):
     if not src.is_file():
         emit({"error": f"{src} does not exist"}, 2)
     # File names are <ns>.<sender>.<kind>.md|read; agent names never contain a dot.
-    if sum(1 for f in box.glob("*.md") if f.is_file() and f.name.split(".")[1] == sender) >= MAX_INBOX:
+    if sum(1 for f in box.iterdir() if f.is_file() and len(f.name.split(".")) > 1
+           and f.name.split(".")[1] == sender) >= MAX_INBOX:
         emit({"to": a.to, "status": "inbox_full", "limit": MAX_INBOX})
     dest = box / f"{time.time_ns()}.{sender}.{a.kind}.md"
     dest.write_text(src.read_text())
     if id_file is not None:
-        # ponytail: a crash before recording the id may duplicate on retry, but cannot lose the written message.
+        # ponytail: a crash before recording the id may duplicate, never lose; overlapping retries can both deliver, so retries assume sequential calls.
         id_file.parent.mkdir(parents=True, exist_ok=True)
         id_file.touch()
     pushed = False

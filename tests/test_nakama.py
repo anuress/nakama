@@ -248,6 +248,16 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual((rc, sent["status"]), (0, "sent"))
         self.assertTrue(id_file.is_file())
 
+    def test_inbox_full_counts_already_read_messages(self):
+        out = self.launch()
+        worker = {**self.env, "NAKAMA_AGENT": out["name"]}
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box.mkdir(parents=True, exist_ok=True)
+        for i in range(20):
+            (box / f"{i}.{out['name']}.info.read").write_text("already read")
+        rc, full = self.nakama("send", "orchestrator", "info", self.msg(), env=worker)
+        self.assertEqual((rc, full["status"]), (0, "inbox_full"))
+
     def test_send_to_unknown_agent_fails(self):
         self.assertEqual(self.nakama("send", "nobody", "info", self.msg())[0], 2)
 
