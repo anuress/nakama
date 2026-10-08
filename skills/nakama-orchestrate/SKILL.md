@@ -29,6 +29,7 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 `nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`.
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
+- stalled → inspect `screen`: progressing → wait again or extend; looping/stuck → teardown and record the task as stopped.
 - failed / malformed / partial with nothing usable → teardown; record the task as stopped.
 Never do delegated work yourself while waiting. Wait on all running builders round-robin (`nakama wait <name> --timeout 30` each) and take each task into step 4 as soon as its builder settles; don't hold a finished task back for slower ones. Only step 6's merges wait for the batch.
 

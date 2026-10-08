@@ -50,6 +50,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 | malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
 | blocked | show `screen` to the user; never answer it yourself (one exception below) |
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
+| stalled | read `screen`: progressing means the worker is just thinking → wait again or `nakama extend`; looping/stuck → `nakama teardown` |
 | message | a worker sent mail: run `nakama inbox`, act (answer an `ask` with `nakama send <name> answer <file>`), then `nakama wait` again. Unread mail makes every wait return at once |
 | running | call `nakama wait` again |
 

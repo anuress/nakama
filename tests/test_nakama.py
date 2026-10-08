@@ -587,6 +587,78 @@ class NakamaTest(unittest.TestCase):
         self.set_state(status="working")
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "running")
 
+    def test_wait_reports_stalled_after_unchanged_screen(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        screen = "Thinking 12:34 ⠋\nGenerating 99%"
+        self.set_state(status="working", screen=screen)
+        env = {**self.env, "NAKAMA_STALL_SEC": "0"}
+        rc, result = self.nakama("wait", out["name"], "--timeout", "5", env=env)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["status"], "stalled")
+        self.assertEqual(result["screen"], screen + "\n")
+        self.assertGreaterEqual(result["idle_seconds"], 0)
+
+    def test_wait_stalls_when_only_digits_and_spinner_change(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", screen="Thinking 12:34 ⠋\nGenerating 99%")
+        env = {**self.env, "NAKAMA_STALL_SEC": "0"}
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5", env=env)[1]["status"], "stalled")
+        screen = "Thinking 87:65 ⠙\nGenerating 10%"
+        self.set_state(status="working", screen=screen)
+        _, result = self.nakama("wait", out["name"], "--timeout", "5", env=env)
+        self.assertEqual(result["status"], "stalled")
+        self.assertEqual(result["screen"], screen + "\n")
+
+    def test_changed_screen_words_reset_stall_timer(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        env = {**self.env, "NAKAMA_STALL_SEC": "0"}
+        self.set_state(status="working", screen="Thinking through solution")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0", env=env)[1]["status"], "running")
+        record = self.root / "records" / f"{out['name']}.json"
+        before = json.loads(record.read_text())
+        self.set_state(status="working", screen="Editing the implementation")
+        _, result = self.nakama("wait", out["name"], "--timeout", "0", env=env)
+        after = json.loads(record.read_text())
+        self.assertEqual(result["status"], "running")
+        self.assertNotEqual(after["screen_sig"], before["screen_sig"])
+        self.assertGreaterEqual(after["screen_changed_at"], before["screen_changed_at"])
+
+    def test_fresh_prompt_resets_stall_tracking(self):
+        out = self.launch()
+        self.task(out)
+        self.task(out, "fix-1.md")
+        self.nakama("prompt", out["name"], "task.md")
+        env = {**self.env, "NAKAMA_STALL_SEC": "0"}
+        self.set_state(status="working", screen="Same visible screen")
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0", env=env)[1]["status"], "running")
+        self.set_state(status="idle", screen="Same visible screen")
+        self.nakama("prompt", out["name"], "fix-1.md")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        self.assertIsNone(rec["screen_sig"])
+        self.assertIsNone(rec["screen_changed_at"])
+        self.set_state(status="working", screen="Same visible screen")
+        _, result = self.nakama("wait", out["name"], "--timeout", "0", env=env)
+        self.assertEqual(result["status"], "running")
+
+    def test_wait_does_not_track_screens_when_not_working(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="blocked", screen="Blocked screen")
+        _, result = self.nakama("wait", out["name"], "--timeout", "5",
+                                env={**self.env, "NAKAMA_STALL_SEC": "0"})
+        self.assertEqual(result["status"], "blocked")
+        rec = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
+        self.assertIsNone(rec["screen_sig"])
+        self.assertIsNone(rec["screen_changed_at"])
+
     def test_failed_prompt_leaves_the_record_untouched(self):
         out = self.launch()
         self.task(out)

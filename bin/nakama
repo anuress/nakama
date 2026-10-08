@@ -30,6 +30,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # Agent-side dialogs herdr does not classify as blocked (pi extensions such as a security scanner).
 PROMPT_MARKERS = ("Allow execution?",)
 CHECK_SEC = 30
+STALL_SEC = 600
 ORCH = "orchestrator"
 MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
 MAX_INBOX = 20
@@ -299,7 +300,8 @@ def cmd_launch(a):
         "model": a.model or (meta["model"] if (a.kind or meta["kind"]) == meta["kind"] else None),
         "mode": meta["mode"], "pane": None, "tab": None, "worktree": worktree, "branch": branch,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
-        "nudged_at": None, "rounds": 0, "closed": False,
+        "nudged_at": None, "screen_sig": None, "screen_changed_at": None,
+        "rounds": 0, "closed": False,
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
@@ -348,7 +350,8 @@ def cmd_prompt(a):
     prompted_at = time.time()
     run(["herdr", "agent", "prompt", rec["name"], f"Read {rel} and do it."])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
-    rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0)
+    rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0,
+               screen_sig=None, screen_changed_at=None)
     save(rec)
     emit({"name": rec["name"], "status": "prompted", "file": str(rel), "rounds": rec["rounds"]})
 
@@ -358,6 +361,7 @@ def cmd_wait(a):
     if not rec.get("prompted_at"):
         emit({"error": f"{rec['name']} was never prompted"}, 2)
     deadline = time.time() + a.timeout
+    stall_sec = float(os.environ.get("NAKAMA_STALL_SEC", str(STALL_SEC)))
     me = os.environ.get("NAKAMA_AGENT", ORCH)
 
     def done(status, **extra):
@@ -390,6 +394,15 @@ def cmd_wait(a):
             tail = [line for line in current.splitlines() if line.strip()][-10:]
             if any(marker in line for line in tail for marker in PROMPT_MARKERS):
                 done("blocked", screen=current)
+            screen_sig = re.sub(r"[^A-Za-z]+", "", "\n".join(tail))
+            now = time.time()
+            if screen_sig != rec.get("screen_sig"):
+                rec.update(screen_sig=screen_sig, screen_changed_at=now)
+                save(rec)
+            else:
+                idle_seconds = now - rec.get("screen_changed_at", now)
+                if idle_seconds >= stall_sec:
+                    done("stalled", screen=current, idle_seconds=int(idle_seconds))
         settled = state in ("idle", "done")
         since = time.time() - max(rec["prompted_at"], rec["nudged_at"] or 0)
         if settled and since >= GRACE_SEC:
@@ -658,7 +671,7 @@ def main():
     s.add_argument("--answer", action="store_true", help="answer to needs_input; does not count as a round")
 
     s = sub.add_parser("wait", help="wait for a worker's result",
-                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/over_budget/message, "
+                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/stalled/over_budget/message, "
                                    "or running when --timeout passes (call it again).")
     s.add_argument("name", help="agent name")
     s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")
