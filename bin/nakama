@@ -89,8 +89,15 @@ def parse_external_json(stdout, command, expected):
     return data
 
 
+def common_body():
+    path = next((d / "_common.md" for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR)
+                 if (d / "_common.md").is_file()), None)
+    return path.read_text().strip() if path else ""
+
+
 def load_role(role):
-    path = next((d / f"{role}.md" for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR) if (d / f"{role}.md").is_file()), None)
+    path = next((d / f"{role}.md" for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR)
+                 if not role.startswith("_") and (d / f"{role}.md").is_file()), None)
     if path is None:
         emit({"error": f"unknown role {role}: no {role}.md in {USER_ROLES_DIR} or {BUNDLED_ROLES_DIR}"}, 2)
     text = path.read_text()
@@ -129,12 +136,13 @@ def load_role(role):
         "spawns": meta.get("spawns", "").lower() in ("true", "yes"),
         "peers": meta.get("peers", "").lower() in ("true", "yes"),
         "path": str(path),
-        "body": body.lstrip(),
+        "body": "\n\n".join(part for part in (common_body(), body.lstrip()) if part),
     }
 
 
 def all_roles():
-    stems = {p.stem for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR) for p in d.glob("*.md")}
+    stems = {p.stem for d in (USER_ROLES_DIR, BUNDLED_ROLES_DIR) for p in d.glob("*.md")
+             if not p.stem.startswith("_")}
     return [load_role(stem) for stem in sorted(stems)]
 
 

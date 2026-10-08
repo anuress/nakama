@@ -98,7 +98,8 @@ nakama teardown b1-fix-login
 
 A role is a markdown file: frontmatter plus a persona. Bundled ones live in
 `roles/`; add or override yours in `~/.config/nakama/roles/`. `nakama roles`
-lists them all. Frontmatter fields:
+lists them all. An optional `_common.md` in either roles directory is prepended to every
+role's persona, with the user roles directory taking precedence. Frontmatter fields:
 
 | field | meaning |
 |---|---|

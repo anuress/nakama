@@ -692,6 +692,36 @@ Broken role.
         self.assertEqual(roles["tester"]["mode"], "write")
         self.assertEqual(roles["builder"]["path"], str(self.root / "roles" / "builder.md"))
 
+    def test_common_persona_precedes_role_persona(self):
+        (self.root / "roles" / "_common.md").write_text("Shared rules.\n")
+        out = self.launch()
+        persona = Path(out["dir"], "persona.md").read_text()
+        self.assertEqual(persona, "Shared rules.\n\nYou are a builder.\n")
+
+    def test_user_common_overrides_bundled(self):
+        (self.root / "roles" / "_common.md").write_text("Bundled common.\n")
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "_common.md").write_text("User common.\n")
+        out = self.launch()
+        persona = Path(out["dir"], "persona.md").read_text()
+        self.assertEqual(persona, "User common.\n\nYou are a builder.\n")
+
+    def test_roles_skips_underscore_files_and_launch_rejects_them(self):
+        roles_dir = self.root / "roles"
+        (roles_dir / "_common.md").write_text("Shared rules.\n")
+        (roles_dir / "_hidden.md").write_text("Not a role.\n")
+        roles = {r["role"] for r in self.nakama("roles")[1]["roles"]}
+        self.assertEqual(roles, {"builder", "reviewer"})
+        rc, out = self.nakama("launch", "_common", "x", "--kind", "pi")
+        self.assertEqual(rc, 2)
+        self.assertIn("unknown role _common", out["error"])
+
+    def test_launch_without_common_persona_still_works(self):
+        out = self.launch()
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(Path(out["dir"], "persona.md").read_text(), "You are a builder.\n")
+
     def doctor_env(self, version="0.9.3", ignored=True):
         home = self.root / "home"
         (home / ".pi/agent/extensions").mkdir(parents=True)
