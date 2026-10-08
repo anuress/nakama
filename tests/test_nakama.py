@@ -693,10 +693,11 @@ Broken role.
         self.assertEqual(roles["builder"]["path"], str(self.root / "roles" / "builder.md"))
 
     def test_common_persona_precedes_role_persona(self):
-        (self.root / "roles" / "_common.md").write_text("Shared rules.\n")
+        (self.root / "roles" / "_common.md").write_text("Shared policy overrides local text.\n")
         out = self.launch()
         persona = Path(out["dir"], "persona.md").read_text()
-        self.assertEqual(persona, "Shared rules.\n\nYou are a builder.\n")
+        self.assertEqual(persona, "Shared policy overrides local text.\n\nYou are a builder.\n")
+        self.assertIn("overrides", persona)
 
     def test_user_common_overrides_bundled(self):
         (self.root / "roles" / "_common.md").write_text("Bundled common.\n")
