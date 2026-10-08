@@ -336,7 +336,7 @@ class NakamaTest(unittest.TestCase):
     def test_help_describes_every_command(self):
         text = self.help_text()
         self.assertNotIn("{launch,", text)
-        for command in ("launch", "prompt", "wait", "send", "inbox", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
+        for command in ("launch", "resume", "prompt", "wait", "send", "inbox", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
             line = next((l for l in text.splitlines() if l.strip().startswith(command + " ")), "")
             self.assertTrue(line.split(command, 1)[1].strip(), f"no description for {command}")
 
@@ -412,6 +412,90 @@ class NakamaTest(unittest.TestCase):
         rc, out = self.nakama("launch", "builder", "x", "--kind", "pi", env={**self.env, "HERDR_ENV": ""})
         self.assertEqual(rc, 2)
         self.assertIn("herdr", out["error"])
+
+    def test_resume_after_teardown_reuses_record_and_reprimes_task(self):
+        out = self.launch()
+        self.task(out)
+        stale_result = Path(self.result(out))
+        stale_result.write_text("Status: succeeded" + chr(10) + "Next: review" + chr(10))
+        old = time.time() - 600
+        os.utime(stale_result, (old, old))
+        record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec.update(rounds=1, budget_min=73, extended_min=15, prompted_at=1, nudged_at=2,
+                   screen_sig="old", screen_changed_at=3)
+        record.write_text(json.dumps(rec))
+        self.nakama("teardown", out["name"])
+
+        rc, resumed = self.nakama("resume", out["name"])
+        self.assertEqual(rc, 0, resumed)
+        self.assertEqual(resumed["status"], "fresh_primed")
+        self.assertEqual(resumed["rounds"], 1)
+        rec = json.loads(record.read_text())
+        self.assertFalse(rec["closed"])
+        self.assertEqual((rec["rounds"], rec["budget_min"]), (1, 73))
+        self.assertEqual(rec["extended_min"], 0)
+        self.assertIsNotNone(rec["prompted_at"])
+        self.assertIsNone(rec["nudged_at"])
+        self.assertIsNone(rec["screen_sig"])
+        self.assertIsNone(rec["screen_changed_at"])
+        prompt = next(c for c in self.calls() if c[1:3] == ["agent", "prompt"])
+        self.assertIn("task.md", prompt[-1])
+        self.assertIn("fix-*.md", prompt[-1])
+        self.assertIn("git log", prompt[-1])
+        self.assertIn("git status", prompt[-1])
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "failed")
+
+    def test_resume_live_worker_does_nothing(self):
+        out = self.launch()
+        self.task(out)
+        before = self.calls()
+        record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
+        before_record = record.read_text()
+        rc, result = self.nakama("resume", out["name"])
+        self.assertEqual((rc, result["status"]), (0, "already_live"))
+        self.assertFalse(any(c[1:3] in (["tab", "create"], ["pane", "split"], ["agent", "start"], ["agent", "prompt"])
+                             for c in self.calls()[len(before):]))
+        self.assertEqual(record.read_text(), before_record)
+
+    def test_resume_requires_existing_task_and_worktree(self):
+        out = self.launch()
+        task = self.task(out)
+        task.unlink()
+        rc, missing_task = self.nakama("resume", out["name"])
+        self.assertEqual(rc, 2)
+        self.assertIn("task.md", missing_task["error"])
+
+        task.write_text("## Goal" + chr(10) + "x" + chr(10))
+        record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["worktree"] = str(self.root / "gone-worktree")
+        record.write_text(json.dumps(rec))
+        rc, missing_tree = self.nakama("resume", out["name"])
+        self.assertEqual(rc, 2)
+        self.assertIn("worktree", missing_tree["error"])
+
+    def test_resume_agent_start_failure_is_blocked(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("teardown", out["name"])
+        self.set_state(status="idle", start_rc=1)
+        rc, result = self.nakama("resume", out["name"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("SCREEN", result["screen"])
+        self.assertFalse(json.loads((Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json").read_text())["closed"])
+
+    def test_resume_obeys_parent_spawn_permission(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("teardown", out["name"])
+        parent = self.launch()
+        before = sum(c[1:3] == ["tab", "create"] for c in self.calls())
+        rc, result = self.nakama("resume", out["name"], env={**self.env, "NAKAMA_AGENT": parent["name"]})
+        self.assertEqual(rc, 2)
+        self.assertIn("spawns", result["error"])
+        self.assertEqual(sum(c[1:3] == ["tab", "create"] for c in self.calls()), before)
 
     def test_start_failure_reports_blocked_with_screen(self):
         self.set_state(status="idle", start_rc=1)

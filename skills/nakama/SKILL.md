@@ -30,6 +30,7 @@ You are a reviewer: ...
 | `nakama launch builder <slug> [--base REF] [--model M] [--name N] [--layout tab\|split]` | new worktree on `agent/<name>` + its own herdr tab (default; `split` = pane beside you) + agent. Returns `name`, `dir`, `worktree` |
 | `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
 | `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
+| `nakama resume <name>` | restart a crashed or torn-down worker on its existing worktree and re-prime it from task.md and fix files; returns `fresh_primed` (the conversation itself is not resumed) |
 | `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` Returns `busy` (nothing sent) while the agent is still working: `nakama wait` first |
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |

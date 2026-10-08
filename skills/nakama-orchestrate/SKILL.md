@@ -26,7 +26,7 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 - Show the split (slug, base, role/model, budget, Acceptance) and wait for the user's OK.
 
 ## 3. Build (per task)
-`nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`.
+`nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`. Use `nakama resume <name>` to recover a crashed or accidentally torn-down worker instead of relaunching; `nakama wait` works again afterward.
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
 - stalled → inspect `screen`: progressing → wait again or extend; looping/stuck → teardown and record the task as stopped.
