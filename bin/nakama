@@ -422,42 +422,65 @@ def unread(name):
     return sorted(box.glob("*.md")) if box and box.is_dir() else []
 
 
-def cmd_send(a):
-    sender = os.environ.get("NAKAMA_AGENT", ORCH)
-    if a.id is not None and not SEND_ID_RE.fullmatch(a.id):
-        emit({"error": "--id must contain 1-64 letters, numbers, underscores, or hyphens"}, 2)
-    src = Path(a.file)
-    box = inbox_dir(a.to)
-    if box is None or a.to == sender:
-        emit({"error": f"no agent {a.to} to message (or it is you)"}, 2)
+def send_one(sender, recipient, kind, src, message_id, live_status=None):
+    box = inbox_dir(recipient)
+    if box is None or recipient == sender:
+        emit({"error": f"no agent {recipient} to message (or it is you)"}, 2)
     # Workers report to the orchestrator; talking to a peer needs the role's 'peers: true'.
-    if sender != ORCH and a.to != ORCH:
+    if sender != ORCH and recipient != ORCH:
         role = load(sender)["role"] if record_path(sender).is_file() else None
         if not (role and load_role(role)["peers"]):
             emit({"error": f"agent {sender} may only message {ORCH}: its role needs 'peers: true'"}, 2)
+    src = Path(src)
     box.mkdir(parents=True, exist_ok=True)
-    id_file = box / ".ids" / f"{sender}.{a.id}" if a.id is not None else None
+    id_file = box / ".ids" / f"{sender}.{message_id}" if message_id is not None else None
     if id_file is not None and id_file.is_file():
-        emit({"to": a.to, "from": sender, "status": "duplicate", "id": a.id})
+        return {"to": recipient, "from": sender, "status": "duplicate", "id": message_id}
     if not src.is_file():
         emit({"error": f"{src} does not exist"}, 2)
     # File names are <ns>.<sender>.<kind>.md|read; agent names never contain a dot.
     if sum(1 for f in box.iterdir() if f.is_file() and len(f.name.split(".")) > 1
            and f.name.split(".")[1] == sender) >= MAX_INBOX:
-        emit({"to": a.to, "status": "inbox_full", "limit": MAX_INBOX})
-    dest = box / f"{time.time_ns()}.{sender}.{a.kind}.md"
+        return {"to": recipient, "status": "inbox_full", "limit": MAX_INBOX}
+    dest = box / f"{time.time_ns()}.{sender}.{kind}.md"
     dest.write_text(src.read_text())
     if id_file is not None:
-        # ponytail: a crash before recording the id may duplicate, never lose; overlapping retries can both deliver, so retries assume sequential calls.
+        # A crash before recording the id may duplicate, never lose; overlapping retries can both deliver, so retries assume sequential calls.
         id_file.parent.mkdir(parents=True, exist_ok=True)
         id_file.touch()
     pushed = False
     # herdr hands a prompt to a working agent too (probed on pi): the pointer reaches it mid-task.
-    if a.to != ORCH and agent_status(a.to) is not None:
-        rel = dest.relative_to(load(a.to)["worktree"])
-        text = f"Message from {sender} ({a.kind}): read {rel} and act on it. It overrides task.md where they conflict."
-        pushed = run(["herdr", "agent", "prompt", a.to, text], check=False).returncode == 0
-    emit({"to": a.to, "from": sender, "kind": a.kind, "status": "sent", "file": str(dest), "pushed": pushed})
+    if recipient != ORCH and (agent_status(recipient) if live_status is None else live_status) is not None:
+        rel = dest.relative_to(load(recipient)["worktree"])
+        text = f"Message from {sender} ({kind}): read {rel} and act on it. It overrides task.md where they conflict."
+        pushed = run(["herdr", "agent", "prompt", recipient, text], check=False).returncode == 0
+    return {"to": recipient, "from": sender, "kind": kind, "status": "sent", "file": str(dest), "pushed": pushed}
+
+
+def cmd_send(a):
+    sender = os.environ.get("NAKAMA_AGENT", ORCH)
+    if a.id is not None and not SEND_ID_RE.fullmatch(a.id):
+        emit({"error": "--id must contain 1-64 letters, numbers, underscores, or hyphens"}, 2)
+    src = Path(a.file)
+    if a.to == "@all":
+        if sender != ORCH:
+            emit({"error": "only the orchestrator may send to @all"}, 2)
+        if not src.is_file():
+            emit({"error": f"{src} does not exist"}, 2)
+        recipients = []
+        for rec in records():
+            name = rec["name"]
+            if name in (sender, ORCH):
+                continue
+            state = agent_status(name)
+            if state is not None:
+                recipients.append((name, state))
+        results = [send_one(sender, name, a.kind, src, a.id, state)
+                   for name, state in recipients]
+        emit({"to": "@all", "from": sender, "kind": a.kind,
+              "status": "sent" if results else "no_recipients", "results": results})
+    result = send_one(sender, a.to, a.kind, src, a.id)
+    emit(result)
 
 
 def cmd_inbox(a):
@@ -640,12 +663,13 @@ def main():
     s.add_argument("name", help="agent name")
     s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")
 
-    s = sub.add_parser("send", help="message another agent or the orchestrator",
-                       description="Drop a message file in the recipient's inbox. Optional --id KEY makes retries "
-                                   "idempotent for that sender and recipient. The orchestrator's nakama wait "
-                                   "returns 'message'; a worker reads it with nakama inbox. Workers may only "
-                                   "message the orchestrator unless their role has 'peers: true'.")
-    s.add_argument("to", help=f"agent name, or '{ORCH}'")
+    s = sub.add_parser("send", help="message an agent, the orchestrator, or all live workers",
+                       description="Drop a message file in the recipient's inbox. The orchestrator can use '@all' "
+                                   "to reach every live worker. Optional --id KEY makes retries idempotent for "
+                                   "that sender and recipient. The orchestrator's nakama wait returns 'message'; "
+                                   "a worker reads it with nakama inbox. Workers may only message the orchestrator "
+                                   "unless their role has 'peers: true'.")
+    s.add_argument("to", help=f"agent name, '{ORCH}', or '@all' (orchestrator only)")
     s.add_argument("kind", choices=MESSAGE_KINDS, help="done: finished; ask: need a judgement; answer; info; blocker")
     s.add_argument("file", help="markdown file holding the message")
     s.add_argument("--id", help="optional idempotency key (1-64 letters, numbers, underscores, or hyphens)")

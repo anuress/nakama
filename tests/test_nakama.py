@@ -31,10 +31,14 @@ elif cmd == ["agent", "list"]:
 elif cmd == ["agent", "start"]:
     sys.exit(st.get("start_rc", 0))
 elif cmd == ["agent", "get"]:
-    if st.get("status") is None:
+    name = args[2]
+    status = st["statuses"].get(name) if name in st.get("statuses", {}) else st.get("status")
+    if status is None:
         sys.exit(1)
-    print(json.dumps({"result": {"agent": {"agent_status": st["status"]}}}))
+    print(json.dumps({"result": {"agent": {"agent_status": status}}}))
 elif cmd == ["agent", "prompt"]:
+    if args[2] in st.get("prompt_fail", []):
+        sys.exit(1)
     write = st.get("write_on_prompt")
     if write:
         time.sleep(0.02)
@@ -257,6 +261,74 @@ class NakamaTest(unittest.TestCase):
             (box / f"{i}.{out['name']}.info.read").write_text("already read")
         rc, full = self.nakama("send", "orchestrator", "info", self.msg(), env=worker)
         self.assertEqual((rc, full["status"]), (0, "inbox_full"))
+
+    def test_broadcast_reaches_live_workers_only(self):
+        first, second, gone = self.launch(), self.launch(), self.launch()
+        records_dir = Path(self.env["NAKAMA_STATE_DIR"])
+        orchestrator = json.loads((records_dir / f"{first['name']}.json").read_text())
+        orchestrator["name"] = "orchestrator"
+        (records_dir / "orchestrator.json").write_text(json.dumps(orchestrator))
+        self.set_state(status=None, statuses={first["name"]: "idle", second["name"]: "working",
+                                             gone["name"]: None, "orchestrator": "idle"})
+        rc, out = self.nakama("send", "@all", "info", self.msg("rebase"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["to"], "@all")
+        self.assertEqual(out["status"], "sent")
+        self.assertEqual([r["to"] for r in out["results"]], [first["name"], second["name"]])
+        self.assertFalse(any(r["to"] == "orchestrator" for r in out["results"]))
+        for worker in (first, second):
+            _, box = self.nakama("inbox", worker["name"])
+            self.assertEqual([m["text"] for m in box["messages"]], ["rebase"])
+        self.assertEqual(self.nakama("inbox", gone["name"])[1]["messages"], [])
+
+    def test_worker_cannot_broadcast_even_with_peers(self):
+        worker = self.launch()
+        worker_env = {**self.env, "NAKAMA_AGENT": worker["name"]}
+        rc, out = self.nakama("send", "@all", "info", self.msg(), env=worker_env)
+        self.assertEqual(rc, 2)
+        self.assertIn("only the orchestrator", out["error"])
+
+    def test_broadcast_with_no_live_workers(self):
+        worker = self.launch()
+        self.set_state(status=None, statuses={worker["name"]: None})
+        rc, out = self.nakama("send", "@all", "info", self.msg())
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["status"], "no_recipients")
+        self.assertEqual(out["results"], [])
+
+    def test_broadcast_continues_after_inbox_full(self):
+        full, available = self.launch(), self.launch()
+        full_box = Path(full["dir"]) / "inbox"
+        full_box.mkdir()
+        for i in range(20):
+            (full_box / f"{i}.orchestrator.info.md").write_text("full")
+        self.set_state(status=None, statuses={full["name"]: "idle", available["name"]: "idle"})
+        rc, out = self.nakama("send", "@all", "info", self.msg("continue"))
+        self.assertEqual(rc, 0)
+        self.assertEqual([r["status"] for r in out["results"]], ["inbox_full", "sent"])
+        self.assertEqual(self.nakama("inbox", available["name"])[1]["messages"][0]["text"], "continue")
+
+    def test_broadcast_continues_after_push_failure(self):
+        failed_push, successful_push = self.launch(), self.launch()
+        self.set_state(status=None, statuses={failed_push["name"]: "working",
+                                             successful_push["name"]: "working"},
+                       prompt_fail=[failed_push["name"]])
+        rc, out = self.nakama("send", "@all", "info", self.msg("continue"))
+        self.assertEqual(rc, 0)
+        self.assertEqual([r["pushed"] for r in out["results"]], [False, True])
+        self.assertEqual(self.nakama("inbox", successful_push["name"])[1]["messages"][0]["text"], "continue")
+
+    def test_broadcast_id_is_idempotent_per_recipient(self):
+        first, second = self.launch(), self.launch()
+        self.set_state(status=None, statuses={first["name"]: "idle", second["name"]: "idle"})
+        args = ("send", "@all", "info", self.msg("once"), "--id", "retry_1")
+        rc, sent = self.nakama(*args)
+        self.assertEqual((rc, [r["status"] for r in sent["results"]]), (0, ["sent", "sent"]))
+        rc, retry = self.nakama(*args)
+        self.assertEqual((rc, [r["status"] for r in retry["results"]]), (0, ["duplicate", "duplicate"]))
+        for worker in (first, second):
+            _, box = self.nakama("inbox", worker["name"])
+            self.assertEqual([m["text"] for m in box["messages"]], ["once"])
 
     def test_send_to_unknown_agent_fails(self):
         self.assertEqual(self.nakama("send", "nobody", "info", self.msg())[0], 2)
