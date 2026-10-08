@@ -579,15 +579,29 @@ def cmd_extend(a):
 
 
 def cmd_teardown(a):
+    if a.force and not a.remove_worktree:
+        emit({"error": "--force requires --remove-worktree"}, 2)
     rec = load(a.name)
     run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
     close_worker_surface(rec)
     removed = False
+    reason = None
     if a.remove_worktree and rec["branch"]:
-        removed = run(["wt", "remove", rec["branch"], "--yes"], check=False).returncode == 0
+        cmd = ["wt", "remove", rec["branch"], "--yes"]
+        if a.force:
+            cmd.append("--force")
+        result = run(cmd, check=False)
+        removed = result.returncode == 0
+        if not removed:
+            reason = (result.stderr + result.stdout)[-300:].strip()
     rec["closed"] = True
     save(rec)
-    emit({"name": rec["name"], "status": "closed", "worktree_removed": removed})
+    out = {"name": rec["name"], "status": "closed", "worktree_removed": removed}
+    if reason is not None:
+        out["reason"] = reason
+    if a.force:
+        out["forced"] = True
+    emit(out)
 
 
 def open_records():
@@ -757,6 +771,7 @@ def main():
     s = sub.add_parser("teardown", help="stop a worker and close its tab")
     s.add_argument("name", help="agent name")
     s.add_argument("--remove-worktree", action="store_true", help="also remove its worktree (the branch is kept)")
+    s.add_argument("--force", action="store_true", help="force worktree removal; requires --remove-worktree")
 
     sub.add_parser("list", help="list open workers and their herdr state")
     sub.add_parser("sweep", help="list orphaned workers and agent/* worktrees (kills nothing)")

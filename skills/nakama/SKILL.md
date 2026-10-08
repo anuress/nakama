@@ -38,7 +38,7 @@ You are a reviewer: ...
 | `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer); orchestrator may use `@all` to broadcast to live workers. Optional `--id KEY` makes retries idempotent. kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy` |
 | `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Default: yourself |
 | `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
-| `nakama teardown <name> [--remove-worktree]` | close the pane; the worktree stays unless the flag is given |
+| `nakama teardown <name> [--remove-worktree] [--force]` | close the pane; `--remove-worktree` reports `reason` when wt refuses; `--force` discards uncommitted and untracked files, never use it unless the user said the leftovers are disposable |
 | `nakama list`, `nakama sweep` | open agents / orphans. sweep never kills; ask the user first |
 | `nakama doctor`, `nakama init <files…>` | setup checks / per-repo `.worktreeinclude` (untracked, hidden) |
 

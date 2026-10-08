@@ -62,6 +62,12 @@ if args[0] == "switch":
     path = os.path.join(os.environ["FAKE_ROOT"], "wt-" + args[2].replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     print(json.dumps({"path": path}))
+elif args[0] == "remove":
+    if os.environ.get("FAKE_WT_REMOVE_STDERR"):
+        print(os.environ["FAKE_WT_REMOVE_STDERR"], file=sys.stderr)
+    if os.environ.get("FAKE_WT_REMOVE_STDOUT"):
+        print(os.environ["FAKE_WT_REMOVE_STDOUT"])
+    sys.exit(int(os.environ.get("FAKE_WT_REMOVE_RC", "0")))
 elif args[0] == "list":
     print(json.dumps({"schema": 2, "items": [{"branch": "agent/b1-old"}, {"branch": "develop"}]}))
 '''
@@ -865,6 +871,48 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         out = self.launch("--layout", "split")
         self.nakama("teardown", out["name"])
         self.assertIn(["herdr", "pane", "close", "w1:p9"], self.calls())
+
+    def test_teardown_worktree_failure_reports_reason_and_closes_record(self):
+        out = self.launch()
+        env = {**self.env, "FAKE_WT_REMOVE_RC": "1",
+               "FAKE_WT_REMOVE_STDERR": "Cannot remove worktree: uncommitted changes",
+               "FAKE_WT_REMOVE_STDOUT": "Commit or stash changes first"}
+        rc, result = self.nakama("teardown", out["name"], "--remove-worktree", env=env)
+        self.assertEqual(rc, 0)
+        self.assertFalse(result["worktree_removed"])
+        self.assertIn("Cannot remove worktree: uncommitted changes", result["reason"])
+        self.assertIn("Commit or stash changes first", result["reason"])
+        record = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
+        self.assertTrue(record["closed"])
+
+    def test_teardown_success_reports_no_reason_and_only_passes_force_when_requested(self):
+        out = self.launch()
+        rc, result = self.nakama("teardown", out["name"], "--remove-worktree")
+        self.assertEqual(rc, 0)
+        self.assertTrue(result["worktree_removed"])
+        self.assertNotIn("reason", result)
+        self.assertNotIn("forced", result)
+        self.assertIn(["wt", "remove", "agent/b1-order-tip", "--yes"], self.calls())
+        self.assertFalse(any(c[:2] == ["wt", "remove"] and "--force" in c for c in self.calls()))
+
+        forced = self.launch()
+        rc, result = self.nakama("teardown", forced["name"], "--remove-worktree", "--force")
+        self.assertEqual(rc, 0)
+        self.assertTrue(result["worktree_removed"])
+        self.assertNotIn("reason", result)
+        self.assertTrue(result["forced"])
+        self.assertIn(["wt", "remove", "agent/b2-order-tip", "--yes", "--force"], self.calls())
+
+    def test_teardown_force_without_remove_worktree_does_nothing(self):
+        out = self.launch()
+        rc, result = self.nakama("teardown", out["name"], "--force")
+        self.assertEqual(rc, 2)
+        self.assertIn("--force requires --remove-worktree", result["error"])
+        self.assertFalse(any(c[1:3] == ["agent", "send-keys"] or c[1:3] in
+                             (["tab", "close"], ["pane", "close"]) for c in self.calls()))
+        record = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
+        self.assertFalse(record["closed"])
+        self.assertFalse(any(c[:2] == ["wt", "remove"] for c in self.calls()))
 
     def test_sweep_lists_orphans_and_kills_nothing(self):
         builder = self.launch()
