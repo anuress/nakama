@@ -280,6 +280,16 @@ def check_parent_permission():
             emit({"error": f"agent {parent} may not launch agents: its role needs 'spawns: true'"}, 2)
 
 
+def close_worker_surface(rec):
+    if rec.get("tab"):
+        run(["herdr", "tab", "close", rec["tab"]], check=False)
+    else:
+        run(["herdr", "pane", "close", rec["pane"]], check=False)
+    if rec.get("gh_config_dir"):
+        # Only the dir recorded at launch is nakama's to delete.
+        shutil.rmtree(rec["gh_config_dir"], ignore_errors=True)
+
+
 def start_worker(rec, meta, layout="tab", direction="right"):
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
     # Target the caller's own workspace/pane: herdr's defaults follow focus, which may be elsewhere.
@@ -356,26 +366,33 @@ def cmd_resume(a):
     meta = load_role(rec["role"])
     if rec.get("kind") not in ("pi", "claude") or rec.get("mode") not in CLAUDE_FLAGS:
         emit({"error": f"record for {rec['name']} has invalid kind or mode"}, 2)
-    if not rec.get("closed") and agent_status(rec["name"]) is not None:
+    state = agent_status(rec["name"]) if not rec.get("closed") else None
+    if state is not None and rec.get("prompted_at") is not None:
         emit({"name": rec["name"], "status": "already_live"})
 
     layout = rec.get("layout") or ("tab" if rec.get("tab") else "split")
-    rec.update(closed=False, prompted_at=None, nudged_at=None, extended_min=0,
-               screen_sig=None, screen_changed_at=None)
-    started = start_worker(rec, meta, layout, rec.get("direction", "right"))
-    out = {"name": rec["name"], "pane": rec["pane"], "worktree": rec["worktree"]}
-    if started.returncode != 0:
-        emit({**out, "status": "blocked", "stderr": started.stderr.strip()[-300:], "screen": screen(rec["name"])})
+    if state is None:
+        if not rec.get("closed"):
+            close_worker_surface(rec)
+        rec.update(closed=False, prompted_at=None, nudged_at=None, extended_min=0,
+                   screen_sig=None, screen_changed_at=None)
+        started = start_worker(rec, meta, layout, rec.get("direction", "right"))
+        if started.returncode != 0:
+            out = {"name": rec["name"], "pane": rec["pane"], "worktree": rec["worktree"]}
+            emit({**out, "status": "blocked", "stderr": started.stderr.strip()[-300:], "screen": screen(rec["name"])})
 
-    prompted_at = time.time()
     message = ("You are being resumed after a restart. Re-read "
                f".agent/{rec['name']}/task.md and every fix-*.md next to it, check `git log` and `git status` "
                "in this worktree to see what is already done, then continue and write result.md as required.")
-    run(["herdr", "agent", "prompt", rec["name"], message])
+    prompted_at = time.time()
+    prompted = run(["herdr", "agent", "prompt", rec["name"], message], check=False)
+    if prompted.returncode != 0:
+        emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
     rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0,
                screen_sig=None, screen_changed_at=None)
     save(rec)
-    emit({**out, "status": "fresh_primed", "rounds": rec["rounds"]})
+    emit({"name": rec["name"], "status": "fresh_primed", "pane": rec["pane"],
+          "worktree": rec["worktree"], "rounds": rec["rounds"]})
 
 
 def cmd_prompt(a):
@@ -564,13 +581,7 @@ def cmd_extend(a):
 def cmd_teardown(a):
     rec = load(a.name)
     run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
-    if rec.get("tab"):
-        run(["herdr", "tab", "close", rec["tab"]], check=False)
-    else:
-        run(["herdr", "pane", "close", rec["pane"]], check=False)
-    if rec.get("gh_config_dir"):
-        # Only the dir recorded at launch is nakama's to delete.
-        shutil.rmtree(rec["gh_config_dir"], ignore_errors=True)
+    close_worker_surface(rec)
     removed = False
     if a.remove_worktree and rec["branch"]:
         removed = run(["wt", "remove", rec["branch"], "--yes"], check=False).returncode == 0

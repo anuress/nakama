@@ -446,9 +446,30 @@ class NakamaTest(unittest.TestCase):
         self.assertIn("git status", prompt[-1])
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "failed")
 
+    def test_resume_cleans_up_old_surface_and_gh_config_for_dead_workers(self):
+        for layout in ("tab", "split"):
+            out = self.launch("--layout", layout)
+            self.task(out)
+            record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
+            old = json.loads(record.read_text())
+            old_gh = Path(old["gh_config_dir"])
+            self.assertTrue(old_gh.is_dir())
+            self.set_state(status=None)
+
+            rc, resumed = self.nakama("resume", out["name"])
+            self.assertEqual((rc, resumed["status"]), (0, "fresh_primed"))
+            close_call = ["herdr", "tab", "close", old["tab"]] if layout == "tab" else [
+                "herdr", "pane", "close", old["pane"]]
+            self.assertIn(close_call, self.calls())
+            self.assertFalse(old_gh.exists())
+            new = json.loads(record.read_text())
+            self.assertNotEqual(new["gh_config_dir"], old["gh_config_dir"])
+            self.assertTrue(Path(new["gh_config_dir"]).is_dir())
+
     def test_resume_live_worker_does_nothing(self):
         out = self.launch()
         self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         before = self.calls()
         record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
         before_record = record.read_text()
@@ -485,6 +506,28 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertIn("SCREEN", result["screen"])
         self.assertFalse(json.loads((Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json").read_text())["closed"])
+
+    def test_resume_prompt_failure_can_be_retried_without_restarting_live_worker(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("teardown", out["name"])
+        self.set_state(status="idle", prompt_fail=[out["name"]])
+
+        rc, failed = self.nakama("resume", out["name"])
+        self.assertEqual((rc, failed["status"]), (1, "prompt_failed"))
+        record = Path(self.env["NAKAMA_STATE_DIR"]) / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        self.assertFalse(rec["closed"])
+        self.assertIsNone(rec["prompted_at"])
+        starts = sum(c[1:3] == ["agent", "start"] for c in self.calls())
+        surfaces = sum(c[1:3] in (["tab", "create"], ["pane", "split"]) for c in self.calls())
+
+        self.set_state(status="idle", prompt_fail=[])
+        rc, retried = self.nakama("resume", out["name"])
+        self.assertEqual((rc, retried["status"]), (0, "fresh_primed"))
+        self.assertEqual(sum(c[1:3] == ["agent", "start"] for c in self.calls()), starts)
+        self.assertEqual(sum(c[1:3] in (["tab", "create"], ["pane", "split"]) for c in self.calls()), surfaces)
+        self.assertIsNotNone(json.loads(record.read_text())["prompted_at"])
 
     def test_resume_obeys_parent_spawn_permission(self):
         out = self.launch()
