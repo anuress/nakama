@@ -106,6 +106,7 @@ class NakamaTest(unittest.TestCase):
             "NAKAMA_STATE_DIR": str(self.root / "records"),
             "NAKAMA_ROLES_DIR": str(self.root / "roles"),
             "NAKAMA_USER_ROLES_DIR": str(self.root / "userroles"),
+            "GIT_CONFIG_GLOBAL": os.devnull,  # no global ignores, hooks or signing leak into test repos
             "NAKAMA_GRACE_SEC": "0",
             "NAKAMA_POLL_SEC": "0",
         })
@@ -603,6 +604,118 @@ class NakamaTest(unittest.TestCase):
         self.assertNotEqual(rev["dir"], builder["dir"])
         self.assertIsNone(rev["branch"])
         self.assertEqual(sum(1 for c in self.calls() if c[:2] == ["wt", "switch"]), 1)
+
+    def test_join_refuses_same_kind_and_model_as_builder(self):
+        builder = self.launch("--model", "m1")
+        rc, err = self.nakama("launch", "reviewer", "r", "--kind", "pi", "--model", "m1", "--join", builder["name"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--model", err["error"])
+        rc, _ = self.nakama("launch", "reviewer", "r", "--kind", "pi", "--model", "m2", "--join", builder["name"])
+        self.assertEqual(rc, 0)
+
+    def test_join_refuses_when_both_models_are_the_cli_default(self):
+        builder = self.launch()
+        rc, err = self.nakama("launch", "reviewer", "r", "--kind", "pi", "--join", builder["name"])
+        self.assertEqual(rc, 2)
+        self.assertIn("joined worker", err["error"])
+
+    def wgit(self, worktree, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=worktree, check=True,
+                              capture_output=True, text=True, env=self.env).stdout.strip()
+
+    def read_review(self, prepare=None):
+        """A read-only reviewer joined to a builder whose worktree is a real git repo with one tracked file."""
+        builder = self.launch()
+        wt = builder["worktree"]
+        self.wgit(wt, "init", "-q")
+        Path(wt, "tracked.txt").write_text("v1")
+        self.wgit(wt, "add", "tracked.txt")
+        self.wgit(wt, "commit", "-q", "-m", "a")
+        if prepare:
+            prepare(wt)
+        rev = self.nakama("launch", "reviewer", "r", "--join", builder["name"])[1]
+        self.task(rev)
+        self.set_state(status="idle", write_on_prompt=self.write_result(rev))
+        self.nakama("prompt", rev["name"], "task.md")
+        return builder, rev
+
+    def write_result(self, rev):
+        return {"path": self.result(rev), "text": "Status: succeeded\nNext: merge\n"}
+
+    def settle(self, rev):
+        return self.nakama("wait", rev["name"], "--timeout", "5")[1]
+
+    def record(self, name):
+        return json.loads((self.root / "records" / f"{name}.json").read_text())
+
+    def test_wait_receipt_is_fixed_at_first_settle(self):
+        builder, rev = self.read_review()
+        wt = builder["worktree"]
+        head = self.wgit(wt, "rev-parse", "HEAD")
+        Path(rev["dir"], "notes.md").write_text("ok")  # inside .agent/: not tampering
+        first = self.settle(rev)
+        self.assertEqual((first["status"], first["reviewed_head"]), ("succeeded", head))
+        self.assertNotIn("stale", first)
+        # The builder moves on (fix round, commit, stray file): the stored receipt is not re-judged.
+        Path(wt, "oops.txt").write_text("x")
+        self.wgit(wt, "add", "-A")
+        self.wgit(wt, "commit", "-q", "-m", "b")
+        again = self.settle(rev)
+        self.assertEqual((again["status"], again["reviewed_head"]), ("succeeded", head))
+        self.assertEqual(self.record(rev["name"])["receipt"]["head_at_result"], head)
+
+    def assert_tampered(self, rev):
+        out = self.settle(rev)
+        self.assertEqual(out["status"], "tampered")
+        self.assertIn("outside .agent/", out["reason"])
+        self.assertEqual(self.settle(rev)["status"], "tampered")
+
+    def test_wait_tampered_when_read_worker_adds_file_outside_agent_dir(self):
+        builder, rev = self.read_review()
+        Path(builder["worktree"], "oops.txt").write_text("x")
+        self.assert_tampered(rev)
+
+    def test_wait_tampered_when_read_worker_edits_already_modified_file(self):
+        builder, rev = self.read_review(lambda wt: Path(wt, "tracked.txt").write_text("v2"))
+        Path(builder["worktree"], "tracked.txt").write_text("v3")
+        self.assert_tampered(rev)
+
+    def test_wait_tampered_when_read_worker_adds_file_in_untracked_dir(self):
+        def prepare(wt):
+            Path(wt, "d").mkdir()
+            Path(wt, "d", "a.txt").write_text("1")
+        builder, rev = self.read_review(prepare)
+        Path(builder["worktree"], "d", "b.txt").write_text("2")
+        self.assert_tampered(rev)
+
+    def test_wait_tampered_when_read_worker_changes_stash(self):
+        builder, rev = self.read_review()
+        Path(builder["worktree"], "tracked.txt").write_text("v2")
+        self.wgit(builder["worktree"], "stash", "push", "-m", "nakama-test-stash")
+        self.assert_tampered(rev)
+
+    def test_wait_tampered_when_read_worker_commits(self):
+        builder, rev = self.read_review()
+        self.wgit(builder["worktree"], "commit", "-q", "--allow-empty", "-m", "by reviewer")
+        self.assert_tampered(rev)
+
+    def test_wait_skips_check_without_git_baseline(self):
+        builder, rev = self.read_review()
+        rec = self.record(rev["name"])
+        del rec["git_before"]
+        (self.root / "records" / f"{rev['name']}.json").write_text(json.dumps(rec))
+        Path(builder["worktree"], "oops.txt").write_text("x")
+        out = self.settle(rev)
+        self.assertEqual(out["status"], "succeeded")
+        self.assertNotIn("reviewed_head", out)
+
+    def test_resume_keeps_read_worker_baseline(self):
+        builder, rev = self.read_review()
+        Path(builder["worktree"], "oops.txt").write_text("x")
+        self.set_state(status=None, write_on_prompt=self.write_result(rev))
+        self.assertEqual(self.nakama("resume", rev["name"])[1]["status"], "fresh_primed")
+        self.set_state(status="idle", write_on_prompt=self.write_result(rev))
+        self.assertEqual(self.settle(rev)["status"], "tampered")
 
     def test_wait_returns_fresh_result_status(self):
         out = self.launch()
@@ -1212,7 +1325,7 @@ Broken role.
         pi.write_text("#!/bin/sh\nexit 0\n")
         pi.chmod(0o755)
         self.set_state(status="idle", version=version)
-        env = {k: v for k, v in self.env.items() if k != "XDG_CONFIG_HOME"}
+        env = {k: v for k, v in self.env.items() if k not in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL")}
         return {**env, "HOME": str(home), "PATH": f"{self.bin_dir}:/usr/bin:/bin"}
 
     def test_doctor_passes_when_everything_is_present(self):

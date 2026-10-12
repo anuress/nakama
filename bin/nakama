@@ -254,6 +254,26 @@ def fresh_result(rec):
     return (status_match.group(1) if status_match else "malformed"), next_hop
 
 
+def git_state(rec):
+    """HEAD, stash list and a content hash of the tree (minus .agent/) of the worker's checkout; None if not git."""
+    def git(*args, cwd=rec["worktree"], env=None):
+        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=env)
+        return p.stdout.strip() if p.returncode == 0 else None
+    top = git("rev-parse", "--show-toplevel")
+    head = git("rev-parse", "HEAD")
+    if top is None or head is None:
+        return None
+    index = git("rev-parse", "--path-format=absolute", "--git-path", "index", cwd=top)
+    with tempfile.TemporaryDirectory(prefix="nakama-index-") as tmp:
+        # A scratch copy of the index: add -A hashes every changed and untracked file's content without touching the real one.
+        if Path(index).is_file():
+            shutil.copy(index, Path(tmp, "index"))
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp, "index"))}
+        git("add", "-A", "--", ".", ":(exclude).agent", cwd=top, env=env)
+        tree = git("write-tree", cwd=top, env=env)
+    return {"head": head, "stash": git("stash", "list", cwd=top), "tree": tree}
+
+
 def over_budget(rec):
     elapsed_min = (time.time() - rec["prompted_at"]) / 60
     return elapsed_min > rec["budget_min"] + rec["extended_min"]
@@ -335,8 +355,14 @@ def cmd_launch(a):
     taken = set(live_names()) | {r["name"] for r in records()}
     name = pick_name(meta, a.slug, taken, a.name)
     branch = None
+    kind = a.kind or meta["kind"]
+    model = a.model or (meta["model"] if kind == meta["kind"] else None)
     if a.join:
-        worktree = load(a.join)["worktree"]
+        builder = load(a.join)
+        if (builder["kind"], builder.get("model")) == (kind, model):
+            emit({"error": f"joined worker {a.join} already runs {kind} {model or '(default model)'}: "
+                           "pass --model (or --kind) to differ"}, 2)
+        worktree = builder["worktree"]
     elif a.no_worktree:
         worktree = os.getcwd()
     else:
@@ -346,8 +372,7 @@ def cmd_launch(a):
             parse_external_json(out, "wt switch", {WT_PATH_KEY: str}), WT_PATH_KEY)
         run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree)
     rec = {
-        "name": name, "role": a.role, "kind": a.kind or meta["kind"],
-        "model": a.model or (meta["model"] if (a.kind or meta["kind"]) == meta["kind"] else None),
+        "name": name, "role": a.role, "kind": kind, "model": model,
         "mode": meta["mode"], "pane": None, "tab": None, "layout": a.layout,
         "direction": a.direction, "worktree": worktree, "branch": branch,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
@@ -394,10 +419,12 @@ def cmd_resume(a):
                f".agent/{rec['name']}/task.md and every fix-*.md next to it, check `git log` and `git status` "
                "in this worktree to see what is already done, then continue and write result.md as required.")
     prompted_at = time.time()
+    # A read worker keeps its original baseline, so a reviewer crash does not forgive what it did before.
+    before = rec["git_before"] if rec["mode"] == "read" and rec.get("git_before") else git_state(rec)
     prompted = run(["herdr", "agent", "prompt", rec["name"], message], check=False)
     if prompted.returncode != 0:
         emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
-    rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0,
+    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
                screen_sig=None, screen_changed_at=None)
     save(rec)
     emit({"name": rec["name"], "status": "fresh_primed", "pane": rec["pane"],
@@ -417,9 +444,11 @@ def cmd_prompt(a):
         rec["rounds"] += 1
     rel = task.relative_to(rec["worktree"])
     prompted_at = time.time()
+    # The review receipt and, for read-only workers, the baseline their effect is checked against.
+    before = git_state(rec)
     run(["herdr", "agent", "prompt", rec["name"], f"Read {rel} and do it."])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
-    rec.update(prompted_at=prompted_at, nudged_at=None, extended_min=0,
+    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
                screen_sig=None, screen_changed_at=None)
     save(rec)
     emit({"name": rec["name"], "status": "prompted", "file": str(rel), "rounds": rec["rounds"]})
@@ -443,6 +472,19 @@ def cmd_wait(a):
         # A fresh result counts only once the agent has settled: it may still commit or rewrite it.
         if status and state in ("idle", "done", None):
             extra = {}
+            before = rec.get("git_before")
+            if before and rec["mode"] == "read":
+                if not rec.get("receipt"):
+                    # Taken once, at the first settled result: later checks would blame the worker for the builder's moves.
+                    # pi keeps bash and write in read mode, so that mode is only an instruction: fail closed on its effect.
+                    now = git_state(rec)
+                    bad = now is None or any(now[k] != before[k] for k in ("head", "stash", "tree"))
+                    rec["receipt"] = {"status": "tampered" if bad else status, "reviewed_head": before["head"],
+                                      "head_at_result": now and now["head"]}
+                    save(rec)
+                if rec["receipt"]["status"] == "tampered":
+                    done("tampered", reason="read-only worker changed HEAD, the stash or files outside .agent/")
+                extra["reviewed_head"] = rec["receipt"]["reviewed_head"]
             # The result is the report: a done mail from this agent would only make the next wait return early.
             for f in unread(me):
                 if f.name.split(".")[1:3] == [rec["name"], "done"]:

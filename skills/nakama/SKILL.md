@@ -22,7 +22,7 @@ peers: true          # optional: this role may `nakama send` to peers, not only 
 ---
 You are a reviewer: ...
 ```
-`--kind/--model/--budget/--name` on launch override per spawn. A reviewer's model must differ from the builder's.
+`--kind/--model/--budget/--name` on launch override per spawn. A reviewer's model must differ from the builder's: `launch --join` refuses a worker whose kind and model, as passed or defaulted, equal the joined worker's (pass `--model`).
 
 ## Commands
 | Command | Use |
@@ -48,6 +48,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 | status | Do |
 |---|---|
 | succeeded / partial / failed / needs_input | the agent has settled with a fresh result.md: read `result` and act on the Status, not the wording |
+| tampered | a read-mode worker changed HEAD, the stash or file contents outside .agent/ (pi's read-only mode is only an instruction): reject its result |
 | malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
 | blocked | show `screen` to the user; never answer it yourself (one exception below) |
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
@@ -55,7 +56,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 | message | a worker sent mail: run `nakama inbox`, act (answer an `ask` with `nakama send <name> answer <file>`), then `nakama wait` again. Unread mail makes every wait return at once |
 | running | call `nakama wait` again |
 
-A `warnings` field is advisory: the orchestrator decides what to do.
+A `warnings` field is advisory: the orchestrator decides what to do. A read-mode result also carries `reviewed_head` (HEAD when it was prompted), fixed at its first settled result; before merging, compare it with the branch HEAD.
 
 The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.
 
