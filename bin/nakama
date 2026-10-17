@@ -214,6 +214,19 @@ def records():
     return [json.loads(p.read_text()) for p in sorted(STATE_DIR.glob("*.json"))]
 
 
+def current_session():
+    return os.environ.get("NAKAMA_SESSION") or os.environ.get("HERDR_PANE_ID") or "default"
+
+
+def session_key(session):
+    key = re.sub(r"[^A-Za-z0-9_-]", "_", session or "default")
+    return key or "default"
+
+
+def record_session(rec):
+    return session_key(rec.get("session") or rec.get("orch_pane") or "default")
+
+
 def agent_dir(rec):
     return Path(rec["worktree"], ".agent", rec["name"])
 
@@ -339,11 +352,19 @@ def start_worker(rec, meta, layout="tab", direction="right"):
 
 
 def launcher_orch_pane():
-    """The orchestrator inbox is global: a worker launched by a worker inherits the root orchestrator's pane."""
+    """A nested worker inherits the root orchestrator pane used for completion nudges."""
     parent = os.environ.get("NAKAMA_AGENT")
     if parent and record_path(parent).is_file():
         return load(parent).get("orch_pane")
     return os.environ.get("HERDR_PANE_ID")
+
+
+def launcher_session():
+    parent = os.environ.get("NAKAMA_AGENT")
+    if parent and record_path(parent).is_file():
+        rec = load(parent)
+        return rec.get("session") or rec.get("orch_pane") or "default"
+    return current_session()
 
 
 def cmd_launch(a):
@@ -378,6 +399,7 @@ def cmd_launch(a):
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
         "nudged_at": None, "screen_sig": None, "screen_changed_at": None,
         "rounds": 0, "closed": False, "orch_pane": launcher_orch_pane(),
+        "session": launcher_session(),
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
     started = start_worker(rec, meta, a.layout, a.direction)
@@ -538,10 +560,10 @@ def cmd_wait(a):
         time.sleep(POLL_SEC)
 
 
-def inbox_dir(name):
-    """The orchestrator's inbox is shared state; a worker's lives in its own .agent dir."""
+def inbox_dir(name, session=None):
+    """Orchestrator mail is session-scoped; each worker's inbox lives in its .agent dir."""
     if name == ORCH:
-        return STATE_DIR / "inbox" / ORCH
+        return STATE_DIR / "inbox" / ORCH / session_key(session or current_session())
     return agent_dir(load(name)) / "inbox" if record_path(name).is_file() else None
 
 
@@ -551,7 +573,8 @@ def unread(name):
 
 
 def send_one(sender, recipient, kind, src, message_id, live_status=None):
-    box = inbox_dir(recipient)
+    sender_rec = load(sender) if sender != ORCH and record_path(sender).is_file() else None
+    box = inbox_dir(recipient, record_session(sender_rec) if recipient == ORCH and sender_rec else None)
     if box is None or recipient == sender:
         emit({"error": f"no agent {recipient} to message (or it is you)"}, 2)
     # Workers report to the orchestrator; talking to a peer needs the role's 'peers: true'.
@@ -603,7 +626,7 @@ def cmd_send(a):
         recipients = []
         for rec in records():
             name = rec["name"]
-            if name in (sender, ORCH):
+            if name in (sender, ORCH) or record_session(rec) != session_key(current_session()):
                 continue
             state = agent_status(name)
             if state is not None:
@@ -674,8 +697,11 @@ def open_records():
 
 
 def cmd_list(a):
+    selected = open_records()
+    if not a.all:
+        selected = [r for r in selected if record_session(r) == session_key(current_session())]
     emit({"agents": [{"name": r["name"], "role": r["role"], "kind": r["kind"], "worktree": r["worktree"],
-                      "rounds": r["rounds"], "state": agent_status(r["name"])} for r in open_records()]})
+                      "rounds": r["rounds"], "state": agent_status(r["name"])} for r in selected]})
 
 
 def cmd_sweep(a):
@@ -814,7 +840,7 @@ def main():
 
     s = sub.add_parser("send", help="message an agent, the orchestrator, or all live workers",
                        description="Drop a message file in the recipient's inbox. The orchestrator can use '@all' "
-                                   "to reach every live worker. Optional --id KEY makes retries idempotent for "
+                                   "to reach every live worker in its session. Optional --id KEY makes retries idempotent for "
                                    "that sender and recipient. The orchestrator's nakama wait returns 'message'; "
                                    "a worker reads it with nakama inbox. Workers may only message the orchestrator "
                                    "unless their role has 'peers: true'.")
@@ -838,7 +864,8 @@ def main():
     s.add_argument("--remove-worktree", action="store_true", help="also remove its worktree (the branch is kept)")
     s.add_argument("--force", action="store_true", help="force worktree removal; requires --remove-worktree")
 
-    sub.add_parser("list", help="list open workers and their herdr state")
+    s = sub.add_parser("list", help="list open workers and their herdr state")
+    s.add_argument("--all", action="store_true", help="include workers from every session")
     sub.add_parser("sweep", help="list orphaned workers and agent/* worktrees (kills nothing)")
     sub.add_parser("roles", help="list roles and the files they come from")
     sub.add_parser("doctor", help="check the setup and print fix commands")

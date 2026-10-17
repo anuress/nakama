@@ -5,7 +5,7 @@ description: Run one pi or Claude Code worker (builder, reviewer, researcher, or
 
 # nakama
 
-Run `herdr --skill` once per session for herdr itself. Every `nakama` command prints one JSON object. Exit 2 = usage error or not inside herdr: stop and tell the user. If anything looks misconfigured, run `nakama doctor` and show its fixes.
+Run `herdr --skill` once per session for herdr itself. Every `nakama` command prints one JSON object. Exit 2 = usage error or not inside herdr: stop and tell the user. If anything looks misconfigured, run `nakama doctor` and show its fixes. Orchestrator session defaults to `HERDR_PANE_ID`; set `NAKAMA_SESSION` to preserve it when restarting in a new pane.
 
 ## Roles
 `nakama roles` prints the roster with each role's file path. A role is a markdown file: frontmatter + persona body. `~/.config/nakama/roles/<role>.md` overrides the bundled one with the same name; add a file to add a role.
@@ -35,11 +35,11 @@ You are a reviewer: ...
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
 | `nakama wait <name>` | returns within ~5 min; on `running`, call it again. Claude orchestrators: give the Bash tool a timeout above 300000 ms (or pass `--timeout 100`) |
-| `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer); orchestrator may use `@all` to broadcast to live workers. Optional `--id KEY` makes retries idempotent. kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy`. A `done`, `ask` or `blocker` to the orchestrator pokes the orchestrator's pane (`nakama inbox` pointer), so a finished worker reaches you outside `wait`; if a dialog is open herdr refuses the poke and the mail stays in the inbox. `wait` drops the `done` mail of the agent it reports, since result.md is the report |
-| `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Default: yourself |
+| `nakama send <to> <kind> <file>` | message the orchestrator (or, with `peers: true`, a peer); orchestrator may use `@all` to broadcast to live workers in its session. Optional `--id KEY` makes retries idempotent. kind: done, ask, answer, info, blocker. The body lives in `<file>`. To a live worker it also pushes a pointer into its pane, even mid-task (`pushed: true`): use it for requirement changes, since `prompt` returns `busy`. A `done`, `ask` or `blocker` to the orchestrator pokes the orchestrator's pane (`nakama inbox` pointer), so a finished worker reaches you outside `wait`; if a dialog is open herdr refuses the poke and the mail stays in the inbox. `wait` drops the `done` mail of the agent it reports, since result.md is the report |
+| `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Orchestrator mail is session-scoped. Default: yourself |
 | `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
 | `nakama teardown <name> [--remove-worktree] [--force]` | close the pane; `--remove-worktree` reports `reason` when wt refuses; `--force` discards uncommitted and untracked files, never use it unless the user said the leftovers are disposable |
-| `nakama list`, `nakama sweep` | open agents / orphans. sweep never kills; ask the user first |
+| `nakama list [--all]`, `nakama sweep` | list open workers in this session (`--all` includes every session) / orphans. sweep never kills; ask the user first |
 | `nakama doctor`, `nakama init <files…>` | setup checks / per-repo `.worktreeinclude` (untracked, hidden) |
 
 Write task files with your normal file tools into the returned `dir` before prompting. Worker panes cannot push or reach GitHub (env backstop); that is an accident guard, not a sandbox.

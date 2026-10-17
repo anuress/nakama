@@ -144,6 +144,61 @@ class NakamaTest(unittest.TestCase):
         path.write_text(text)
         return str(path)
 
+    def orch_box(self, session="w3:p1"):
+        safe_session = "".join(c if c.isalnum() or c in "_-" else "_" for c in session) or "default"
+        return Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / safe_session
+
+    def test_orchestrator_inboxes_and_waits_are_session_isolated(self):
+        env_a = {**self.env, "HERDR_PANE_ID": "pane:A"}
+        env_b = {**self.env, "HERDR_PANE_ID": "pane:B"}
+        a = self.nakama("launch", "builder", "Session A", "--kind", "pi", env=env_a)[1]
+        b = self.nakama("launch", "builder", "Session B", "--kind", "pi", env=env_b)[1]
+        record_a = Path(env_a["NAKAMA_STATE_DIR"]) / f"{a['name']}.json"
+        self.assertEqual(json.loads(record_a.read_text())["session"], "pane:A")
+        worker_b = {**env_b, "NAKAMA_AGENT": b["name"]}
+        self.nakama("send", "orchestrator", "ask", self.msg("B only"), env=worker_b)
+
+        self.assertEqual(self.nakama("inbox", env=env_a)[1]["messages"], [])
+        self.task(a)
+        self.nakama("prompt", a["name"], "task.md", env=env_a)
+        self.assertNotEqual(self.nakama("wait", a["name"], "--timeout", "0", env=env_a)[1]["status"], "message")
+        self.assertTrue(self.orch_box("pane:B").is_dir())
+        _, inbox_b = self.nakama("inbox", env=env_b)
+        self.assertEqual([message["text"] for message in inbox_b["messages"]], ["B only"])
+
+    def test_session_override_nested_inheritance_and_legacy_fallback(self):
+        user_roles = self.root / "userroles"
+        user_roles.mkdir()
+        (user_roles / "lead.md").write_text(
+            "---\nprefix: l\nkind: pi\nmode: write\nspawns: true\n---\nLead.\n")
+        override = {**self.env, "HERDR_PANE_ID": "pane:original", "NAKAMA_SESSION": "chosen/session"}
+        parent = self.nakama("launch", "lead", "Parent", env=override)[1]
+        parent_record = Path(override["NAKAMA_STATE_DIR"]) / f"{parent['name']}.json"
+        self.assertEqual(json.loads(parent_record.read_text())["session"], "chosen/session")
+        child_env = {**self.env, "HERDR_PANE_ID": "pane:child", "NAKAMA_AGENT": parent["name"]}
+        child = self.nakama("launch", "builder", "Child", "--kind", "pi", env=child_env)[1]
+        child_record = Path(child_env["NAKAMA_STATE_DIR"]) / f"{child['name']}.json"
+        self.assertEqual(json.loads(child_record.read_text())["session"], "chosen/session")
+        worker = {**self.env, "NAKAMA_AGENT": parent["name"]}
+        self.nakama("send", "orchestrator", "info", self.msg("override"), env=worker)
+        self.assertEqual([m["text"] for m in self.nakama("inbox", env=override)[1]["messages"]], ["override"])
+
+        legacy = json.loads(parent_record.read_text())
+        legacy.pop("session")
+        parent_record.write_text(json.dumps(legacy))
+        self.nakama("send", "orchestrator", "info", self.msg("legacy"), env=worker)
+        legacy_session = {**self.env, "HERDR_PANE_ID": "pane:original"}
+        self.assertEqual([m["text"] for m in self.nakama("inbox", env=legacy_session)[1]["messages"]], ["legacy"])
+
+    def test_list_filters_to_session_unless_all_requested(self):
+        env_a = {**self.env, "HERDR_PANE_ID": "pane:A"}
+        env_b = {**self.env, "HERDR_PANE_ID": "pane:B"}
+        a = self.nakama("launch", "builder", "Session A", "--kind", "pi", env=env_a)[1]
+        b = self.nakama("launch", "builder", "Session B", "--kind", "pi", env=env_b)[1]
+        self.assertEqual([r["name"] for r in self.nakama("list", env=env_a)[1]["agents"]], [a["name"]])
+        self.assertEqual({r["name"] for r in self.nakama("list", "--all", env=env_a)[1]["agents"]},
+                         {a["name"], b["name"]})
+
     def test_worker_message_wakes_orchestrator_wait(self):
         out = self.launch()
         self.task(out)
@@ -263,7 +318,7 @@ class NakamaTest(unittest.TestCase):
         rc, sent = self.nakama("send", "orchestrator", "info", self.msg("ordinary"), env=worker)
         self.assertEqual((rc, sent["status"]), (0, "sent"))
         self.assertNotIn("id", sent)
-        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box = self.orch_box()
         self.assertFalse((box / ".ids").exists())
         _, inbox = self.nakama("inbox")
         self.assertEqual([m["text"] for m in inbox["messages"]], ["ordinary"])
@@ -277,7 +332,7 @@ class NakamaTest(unittest.TestCase):
         out = self.launch()
         worker = {**self.env, "NAKAMA_AGENT": out["name"]}
         self.nakama("send", "orchestrator", "info", self.msg("keep sidecar"), "--id", "stable", env=worker)
-        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box = self.orch_box()
         id_file = box / ".ids" / f"{out['name']}.stable"
         self.assertTrue(id_file.is_file())
         _, inbox = self.nakama("inbox")
@@ -289,7 +344,7 @@ class NakamaTest(unittest.TestCase):
     def test_inbox_full_does_not_record_id(self):
         out = self.launch()
         worker = {**self.env, "NAKAMA_AGENT": out["name"]}
-        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box = self.orch_box()
         box.mkdir(parents=True, exist_ok=True)
         for i in range(20):
             (box / f"{i}.{out['name']}.info.md").write_text("full")
@@ -305,7 +360,7 @@ class NakamaTest(unittest.TestCase):
     def test_inbox_full_counts_already_read_messages(self):
         out = self.launch()
         worker = {**self.env, "NAKAMA_AGENT": out["name"]}
-        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator"
+        box = self.orch_box()
         box.mkdir(parents=True, exist_ok=True)
         for i in range(20):
             (box / f"{i}.{out['name']}.info.read").write_text("already read")
@@ -330,6 +385,18 @@ class NakamaTest(unittest.TestCase):
             _, box = self.nakama("inbox", worker["name"])
             self.assertEqual([m["text"] for m in box["messages"]], ["rebase"])
         self.assertEqual(self.nakama("inbox", gone["name"])[1]["messages"], [])
+
+    def test_broadcast_reaches_only_workers_in_current_session(self):
+        env_a = {**self.env, "HERDR_PANE_ID": "pane:A"}
+        env_b = {**self.env, "HERDR_PANE_ID": "pane:B"}
+        a = self.nakama("launch", "builder", "Session A", "--kind", "pi", env=env_a)[1]
+        b = self.nakama("launch", "builder", "Session B", "--kind", "pi", env=env_b)[1]
+        self.set_state(status=None, statuses={a["name"]: "working", b["name"]: "working"})
+        rc, out = self.nakama("send", "@all", "info", self.msg("A only"), env=env_a)
+        self.assertEqual(rc, 0)
+        self.assertEqual([result["to"] for result in out["results"]], [a["name"]])
+        self.assertEqual(self.nakama("inbox", a["name"])[1]["messages"][0]["text"], "A only")
+        self.assertEqual(self.nakama("inbox", b["name"])[1]["messages"], [])
 
     def test_worker_cannot_broadcast_even_with_peers(self):
         worker = self.launch()
@@ -1228,7 +1295,7 @@ Broken role.
             "agent list": {"result": {"agents": []}},
             "agent get": {"result": {"agent": {}}},
         })
-        rc, out = self.nakama("list")
+        rc, out = self.nakama("list", env={**self.env, "NAKAMA_SESSION": "default"})
         self.assertEqual(rc, 1)
         self.assertEqual(out, {"error": "herdr agent get returned unexpected output", "stdout": '{"result": {"agent": {}}}\n'})
 

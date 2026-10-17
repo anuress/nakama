@@ -36,7 +36,11 @@ than guess. For that there's a mailbox: `nakama send <to> <kind> <file>` puts a
 message in the recipient's inbox, and for a live worker it also nudges its pane,
 so the pointer arrives at its next step. A worker's `ask` or `blocker` to the
 orchestrator wakes the orchestrator's `nakama wait`. Workers may only message
-the orchestrator unless their role opts in with `peers: true`.
+the orchestrator unless their role opts in with `peers: true`. Orchestrator
+inboxes and `nakama send @all` are scoped to the current session, so concurrent
+orchestrators do not consume each other's mail or broadcast to each other's
+workers. The session defaults to `HERDR_PANE_ID`; set `NAKAMA_SESSION` to keep
+the same session when restarting an orchestrator in a new pane.
 
 ## Which agents work today
 
