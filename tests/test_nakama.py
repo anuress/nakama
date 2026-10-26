@@ -755,6 +755,14 @@ class NakamaTest(unittest.TestCase):
         Path(builder["worktree"], "d", "b.txt").write_text("2")
         self.assert_tampered(rev)
 
+    def test_wait_ignores_stash_created_on_another_branch(self):
+        builder, rev = self.read_review()
+        other = Path(builder["worktree"]).parent / "other-branch"
+        self.wgit(builder["worktree"], "worktree", "add", "-b", "other-branch", str(other), "HEAD")
+        Path(other, "tracked.txt").write_text("other branch change")
+        self.wgit(other, "stash", "push", "-m", "nakama-test-stash")
+        self.assertEqual(self.settle(rev)["status"], "succeeded")
+
     def test_wait_tampered_when_read_worker_changes_stash(self):
         builder, rev = self.read_review()
         Path(builder["worktree"], "tracked.txt").write_text("v2")

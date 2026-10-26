@@ -284,7 +284,11 @@ def git_state(rec):
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp, "index"))}
         git("add", "-A", "--", ".", ":(exclude).agent", cwd=top, env=env)
         tree = git("write-tree", cwd=top, env=env)
-    return {"head": head, "stash": git("stash", "list", cwd=top), "tree": tree}
+    branch = git("symbolic-ref", "--short", "-q", "HEAD", cwd=top) or "(no branch)"
+    stash_entries = git("stash", "list", "--format=%gd:%gs", cwd=top) or ""
+    own_stashes = [entry for entry in stash_entries.splitlines()
+                   if entry.partition(":")[2].startswith((f"WIP on {branch}:", f"On {branch}:"))]
+    return {"head": head, "stash": "\n".join(own_stashes), "tree": tree}
 
 
 def over_budget(rec):
