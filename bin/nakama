@@ -37,6 +37,7 @@ MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
 MAX_INBOX = 20
 SEND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 STATUS_VALUES = ("succeeded", "partial", "failed", "needs_input")
+STATUS_VALUE_RE = re.compile(r"^(" + "|".join(STATUS_VALUES) + r")\b")
 STATUS_LINE_RE = re.compile(r"^(?:\*\*)?Status:[ \t]*(.*?)(?:\*\*)?[ \t]*$", re.M)
 NEXT_RE = re.compile(r"^(?:\*\*)?Next:[ \t]*(\S+?)(?:\*\*)?[ \t]*$", re.M)
 NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
@@ -264,14 +265,15 @@ def fresh_result(rec):
     text = result.read_text()
     status_line = STATUS_LINE_RE.search(text)
     status_value = status_line.group(1).strip() if status_line else None
+    status_match = STATUS_VALUE_RE.match(status_value or "")
     next_match = NEXT_RE.search(text)
     next_hop = next_match.group(1) if next_match and next_match.group(1) in NEXT_HOPS else None
     hint = None
-    if status_value not in STATUS_VALUES:
+    if not status_match:
         allowed = ", ".join(STATUS_VALUES)
         got = f" (got {json.dumps(status_value)})" if status_line else ""
         hint = f"Status must be exactly one of {allowed}{got}"
-    return (status_value if status_value in STATUS_VALUES else "malformed"), next_hop, hint
+    return (status_match.group(1) if status_match else "malformed"), next_hop, hint
 
 
 def git_state(rec):

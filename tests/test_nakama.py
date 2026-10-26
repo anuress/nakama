@@ -889,6 +889,15 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(result["hint"],
                          'Status must be exactly one of succeeded, partial, failed, needs_input (got "done")')
 
+    def test_wait_accepts_trailing_text_after_status_value(self):
+        for text, expected in (("Status: succeeded.\n", "succeeded"),
+                               ("Status: succeeded — all green\n", "succeeded"),
+                               ("Status: partial (2/4)\n", "partial")):
+            with self.subTest(text=text):
+                result = self.wait_with_result(text)
+                self.assertEqual(result["status"], expected)
+                self.assertNotIn("hint", result)
+
     def test_prompt_includes_required_result_status_enum(self):
         out = self.launch()
         self.task(out)
