@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 REPO_DIR = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 STATE_DIR = Path(os.environ.get("NAKAMA_STATE_DIR", str(HOME / ".local/state/nakama")))
