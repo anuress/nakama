@@ -1096,6 +1096,27 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertFalse(mine.exists())
         self.assertTrue(decoy.is_dir())
 
+    def test_sweep_filters_open_records_to_session_unless_all_requested(self):
+        env_a = {**self.env, "HERDR_PANE_ID": "pane:A"}
+        env_b = {**self.env, "HERDR_PANE_ID": "pane:B"}
+        a = self.nakama("launch", "builder", "Session A", env=env_a)[1]
+        b = self.nakama("launch", "builder", "Session B", env=env_b)[1]
+        self.set_state(status=None, statuses={a["name"]: "idle", b["name"]: "idle"},
+                       agents=[{"name": a["name"]}, {"name": b["name"]}, {"name": "r9-stray"}])
+
+        default = self.nakama("sweep", env=env_a)[1]
+        all_sessions = self.nakama("sweep", "--all", env=env_a)[1]
+        self.assertEqual([r["name"] for r in default["open_records"]], [a["name"]])
+        self.assertEqual({r["name"] for r in all_sessions["open_records"]}, {a["name"], b["name"]})
+        self.assertEqual(default["stray_agents"], ["r9-stray"])
+        self.assertEqual(all_sessions["stray_agents"], ["r9-stray"])
+        self.assertEqual(default["agent_worktrees"], all_sessions["agent_worktrees"])
+
+    def test_sweep_help_describes_session_scope_and_all_option(self):
+        text = self.help_text("sweep")
+        self.assertIn("--all", text)
+        self.assertIn("every session", text)
+
     def test_sweep_finds_custom_names_through_their_record(self):
         # A custom --name matches no pattern; its record is the only proof nakama started it.
         out = self.launch("--name", "custom-agent")

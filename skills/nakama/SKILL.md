@@ -39,7 +39,7 @@ You are a reviewer: ...
 | `nakama inbox [name]` | print and clear unread messages (`--peek` keeps them). Orchestrator mail is session-scoped. Default: yourself |
 | `nakama extend <name> <min>` | only after reading the screen and seeing progress; the 180-minute ceiling applies per prompt (a new prompt or `--answer` starts a fresh budget) |
 | `nakama teardown <name> [--remove-worktree] [--force]` | close the pane; `--remove-worktree` reports `reason` when wt refuses; `--force` discards uncommitted and untracked files, never use it unless the user said the leftovers are disposable |
-| `nakama list [--all]`, `nakama sweep` | list open workers in this session (`--all` includes every session) / orphans. sweep never kills; ask the user first |
+| `nakama list [--all]`, `nakama sweep [--all]` | list open worker records in this session by default (`--all` includes every session); sweep also reports global orphaned workers and `agent/*` worktrees, and never kills anything |
 | `nakama doctor`, `nakama init <files…>` | setup checks / per-repo `.worktreeinclude` (untracked, hidden) |
 
 Write task files with your normal file tools into the returned `dir` before prompting. Worker panes cannot push or reach GitHub (env backstop); that is an accident guard, not a sandbox.

@@ -720,8 +720,10 @@ def cmd_list(a):
 
 def cmd_sweep(a):
     require_herdr()
-    recs = open_records()
-    known = {r["name"] for r in recs}
+    all_open = open_records()
+    recs = all_open if a.all else [r for r in all_open
+                                   if record_session(r) == session_key(current_session())]
+    known = {r["name"] for r in all_open}
     metas = all_roles()
     # A custom --name matches no pattern; a record (open or closed) is what marks an agent as ours.
     recorded = {r["name"] for r in records()}
@@ -880,7 +882,8 @@ def main():
 
     s = sub.add_parser("list", help="list open workers and their herdr state")
     s.add_argument("--all", action="store_true", help="include workers from every session")
-    sub.add_parser("sweep", help="list orphaned workers and agent/* worktrees (kills nothing)")
+    s = sub.add_parser("sweep", help="list this session's open workers, orphaned workers and agent/* worktrees")
+    s.add_argument("--all", action="store_true", help="include open worker records from every session")
     sub.add_parser("roles", help="list roles and the files they come from")
     sub.add_parser("doctor", help="check the setup and print fix commands")
     s = sub.add_parser("init", help="write this repo's .worktreeinclude, hidden from git",
