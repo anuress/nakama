@@ -26,10 +26,10 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 - Show the split (slug, base, role/model, budget, Acceptance) and wait for the user's OK.
 
 ## 3. Build (per task)
-`nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`. Use `nakama resume <name>` to recover a crashed or accidentally torn-down worker instead of relaunching; `nakama wait` works again afterward.
-- Before writing `task.md`, read every file it touches in full, including parent-container callers; add any newly found scope to this task or create a separate task.
-- For visible UI changes, put measurable pre-change sizes, offsets and spacing on the target device or browser in Acceptance; have the orchestrator re-measure after the gate.
+- Before writing `task.md`, read every file it touches in full, including its parent container and callers; add any newly found scope to this task or create a separate task.
+- For visible UI changes, put measurable pre-change sizes, offsets and spacing on the target device or browser in Acceptance; step 4 re-measures them.
 - For claims only a compiler, profiler or analyzer can prove, require its output pasted into Evidence so the reviewer can verify it without running a build.
+`nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`. Use `nakama resume <name>` to recover a crashed or accidentally torn-down worker instead of relaunching; `nakama wait` works again afterward.
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
 - stalled → inspect `screen`: progressing → wait again or extend; looping/stuck → teardown and record the task as stopped.
@@ -37,7 +37,7 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 Never do delegated work yourself while waiting. Wait on all running builders round-robin (`nakama wait <name> --timeout 30` each) and take each task into step 4 as soon as its builder settles; don't hold a finished task back for slower ones. Only step 6's merges wait for the batch.
 
 ## 4. Gate
-Run the Acceptance commands yourself in the builder's worktree, writing the output to `<dir>/gate-N.log`. Check the main checkout's `git status --porcelain` still matches Setup.
+Run the Acceptance commands yourself in the builder's worktree, writing the output to `<dir>/gate-N.log`. Check the main checkout's `git status --porcelain` still matches Setup. For visible UI changes, re-measure the before-numbers from Acceptance on the device or browser before treating the gate as green.
 - Green → step 5.
 - Red → fix-N.md with the failing lines and a pointer to gate-N.log → `nakama prompt <name> fix-N.md`. `round_limit` → step 6, stopped.
 - Resource symptoms in any build output (the build daemon died, out-of-memory errors, heavy swapping): stop and propose a lower `max_builders` to the user.
