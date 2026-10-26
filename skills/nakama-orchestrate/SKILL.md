@@ -27,6 +27,9 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 
 ## 3. Build (per task)
 `nakama launch builder …` → write task.md (Acceptance = the repo's verification commands scoped to the change) → `nakama prompt <name> task.md` → `nakama wait <name>` until it is no longer `running`. Use `nakama resume <name>` to recover a crashed or accidentally torn-down worker instead of relaunching; `nakama wait` works again afterward.
+- Before writing `task.md`, read every file it touches in full, including parent-container callers; add any newly found scope to this task or create a separate task.
+- For visible UI changes, put measurable pre-change sizes, offsets and spacing on the target device or browser in Acceptance; have the orchestrator re-measure after the gate.
+- For claims only a compiler, profiler or analyzer can prove, require its output pasted into Evidence so the reviewer can verify it without running a build.
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
 - stalled → inspect `screen`: progressing → wait again or extend; looping/stuck → teardown and record the task as stopped.
