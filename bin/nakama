@@ -42,7 +42,7 @@ STATUS_LINE_RE = re.compile(r"^(?:\*\*)?Status:[ \t]*(.*?)(?:\*\*)?[ \t]*$", re.
 NEXT_RE = re.compile(r"^(?:\*\*)?Next:[ \t]*(\S+?)(?:\*\*)?[ \t]*$", re.M)
 NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
 
-# Set from the probe results (plan Tasks 1-3).
+# Verified against live wt and pi/Claude CLIs.
 WT_PATH_KEY = "path"
 PI_PERSONA_AS_TEXT = False
 PI_READ_TOOLS = "read,bash,grep,find,ls,write"

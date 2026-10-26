@@ -54,16 +54,15 @@ choose the CLI and model per task, so mixing them is normal.
 ## Requirements
 
 herdr ≥ 0.9.3 (with `herdr integration install` for each agent CLI you use),
-worktrunk (`wt`), git ≥ 2.31, python3 ≥ 3.9, and at least one supported agent
+worktrunk (`wt`), git ≥ 2.31, python3 ≥ 3.10, and at least one supported agent
 CLI.
 
 ## Install
 
-With Homebrew. The formula lives in this repo, so the tap needs the explicit URL
-(SSH while the repo is private):
+With Homebrew. The formula lives in this repo, so the tap needs the explicit URL:
 
 ```bash
-brew tap anuress/nakama git@github.com:anuress/nakama.git
+brew tap anuress/nakama https://github.com/anuress/nakama
 brew install nakama
 $(brew --prefix nakama)/libexec/install.sh --skills-only   # link skills into your agents
 brew upgrade nakama                                         # later; skill links follow
