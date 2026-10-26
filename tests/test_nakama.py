@@ -763,6 +763,18 @@ class NakamaTest(unittest.TestCase):
         self.wgit(other, "stash", "push", "-m", "nakama-test-stash")
         self.assertEqual(self.settle(rev)["status"], "succeeded")
 
+    def test_wait_ignores_other_branch_stash_reordering_own_stash(self):
+        def prepare(wt):
+            Path(wt, "tracked.txt").write_text("reviewer branch change")
+            self.wgit(wt, "stash", "push", "-m", "reviewer-branch-stash")
+
+        builder, rev = self.read_review(prepare)
+        other = Path(builder["worktree"]).parent / "other-branch"
+        self.wgit(builder["worktree"], "worktree", "add", "-b", "other-branch", str(other), "HEAD")
+        Path(other, "tracked.txt").write_text("other branch change")
+        self.wgit(other, "stash", "push", "-m", "other-branch-stash")
+        self.assertEqual(self.settle(rev)["status"], "succeeded")
+
     def test_wait_tampered_when_read_worker_changes_stash(self):
         builder, rev = self.read_review()
         Path(builder["worktree"], "tracked.txt").write_text("v2")
