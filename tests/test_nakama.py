@@ -1229,9 +1229,16 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         starts = [c for c in self.calls() if c[1:3] == ["agent", "start"]]
         modes = [s[s.index("--permission-mode") + 1] for s in starts]
         self.assertEqual(modes, ["default", "acceptEdits"])
-        # Read-only inspection must not stop on a permission prompt.
-        for tool in ("Bash(git grep:*)", "Bash(git ls-files:*)"):
-            self.assertIn(tool, starts[0])
+        # Read-only inspection and creating .agent files must not stop on a permission prompt.
+        read_tools = starts[0][starts[0].index("--allowedTools") + 1:starts[0].index("--model")]
+        self.assertEqual(read_tools, ["Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+                                      "Bash(git status:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
+                                      "Edit(.agent/**)", "Write(.agent/**)", "Bash(nakama send:*)",
+                                      "Bash(nakama inbox:*)"])
+        write_tools = starts[1][starts[1].index("--allowedTools") + 1:]
+        self.assertEqual(write_tools, ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+                                       "Bash(git add:*)", "Bash(git commit:*)", "Bash(mkdir:*)",
+                                       "Bash(nakama send:*)", "Bash(nakama inbox:*)"])
 
     def test_flags_override_frontmatter(self):
         rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree",

@@ -53,7 +53,7 @@ CLAUDE_FLAGS = {
               "Bash(nakama send:*)", "Bash(nakama inbox:*)"],
     "read": ["--permission-mode", "default", "--allowedTools", "Bash(git diff:*)", "Bash(git log:*)",
              "Bash(git show:*)", "Bash(git status:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
-             "Edit(.agent/**)", "Bash(nakama send:*)", "Bash(nakama inbox:*)"],
+             "Edit(.agent/**)", "Write(.agent/**)", "Bash(nakama send:*)", "Bash(nakama inbox:*)"],
 }
 
 
