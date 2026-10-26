@@ -813,6 +813,10 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual((result["status"], result["next"]), ("succeeded", "review"))
         self.assertNotIn("warnings", result)
 
+    def test_wait_accepts_bold_status_and_next_lines(self):
+        result = self.wait_with_result("**Status: succeeded**\n**Next: none**\n")
+        self.assertEqual((result["status"], result["next"]), ("succeeded", "none"))
+
     def test_succeeded_without_next_hop_warns(self):
         result = self.wait_with_result("Status: succeeded\n")
         self.assertEqual(result["warnings"], ["no_next_hop"])
@@ -863,7 +867,22 @@ class NakamaTest(unittest.TestCase):
         self.task(out)
         self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": "done!\n"})
         self.nakama("prompt", out["name"], "task.md")
-        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "malformed")
+        result = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(result["status"], "malformed")
+        self.assertEqual(result["hint"], "Status must be exactly one of succeeded, partial, failed, needs_input")
+
+    def test_result_with_unknown_status_is_malformed_with_enum_hint(self):
+        result = self.wait_with_result("Status: done\n")
+        self.assertEqual(result["status"], "malformed")
+        self.assertEqual(result["hint"],
+                         'Status must be exactly one of succeeded, partial, failed, needs_input (got "done")')
+
+    def test_prompt_includes_required_result_status_enum(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertIn("Status exactly one of succeeded, partial, failed, needs_input", prompt[-1])
 
     def test_nudges_exactly_once_then_fails(self):
         out = self.launch()

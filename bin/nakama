@@ -36,8 +36,9 @@ PUSH_KINDS = ("done", "ask", "blocker")
 MESSAGE_KINDS = ("done", "ask", "answer", "info", "blocker")
 MAX_INBOX = 20
 SEND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-STATUS_RE = re.compile(r"^Status:\s*(succeeded|partial|failed|needs_input)\b", re.M)
-NEXT_RE = re.compile(r"^Next:\s*(\S+)\s*$", re.M)
+STATUS_VALUES = ("succeeded", "partial", "failed", "needs_input")
+STATUS_LINE_RE = re.compile(r"^(?:\*\*)?Status:[ \t]*(.*?)(?:\*\*)?[ \t]*$", re.M)
+NEXT_RE = re.compile(r"^(?:\*\*)?Next:[ \t]*(\S+?)(?:\*\*)?[ \t]*$", re.M)
 NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
 
 # Set from the probe results (plan Tasks 1-3).
@@ -259,12 +260,18 @@ def screen(name):
 def fresh_result(rec):
     result = agent_dir(rec) / "result.md"
     if not rec.get("prompted_at") or not result.is_file() or result.stat().st_mtime <= rec["prompted_at"]:
-        return None, None
+        return None, None, None
     text = result.read_text()
-    status_match = STATUS_RE.search(text)
+    status_line = STATUS_LINE_RE.search(text)
+    status_value = status_line.group(1).strip() if status_line else None
     next_match = NEXT_RE.search(text)
     next_hop = next_match.group(1) if next_match and next_match.group(1) in NEXT_HOPS else None
-    return (status_match.group(1) if status_match else "malformed"), next_hop
+    hint = None
+    if status_value not in STATUS_VALUES:
+        allowed = ", ".join(STATUS_VALUES)
+        got = f" (got {json.dumps(status_value)})" if status_line else ""
+        hint = f"Status must be exactly one of {allowed}{got}"
+    return (status_value if status_value in STATUS_VALUES else "malformed"), next_hop, hint
 
 
 def git_state(rec):
@@ -472,7 +479,8 @@ def cmd_prompt(a):
     prompted_at = time.time()
     # The review receipt and, for read-only workers, the baseline their effect is checked against.
     before = git_state(rec)
-    run(["herdr", "agent", "prompt", rec["name"], f"Read {rel} and do it."])
+    run(["herdr", "agent", "prompt", rec["name"],
+         f"Read {rel} and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input."])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
     rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
                screen_sig=None, screen_changed_at=None)
@@ -494,7 +502,7 @@ def cmd_wait(a):
 
     while True:
         state = agent_status(rec["name"])
-        status, next_hop = fresh_result(rec)
+        status, next_hop, hint = fresh_result(rec)
         # A fresh result counts only once the agent has settled: it may still commit or rewrite it.
         if status and state in ("idle", "done", None):
             extra = {}
@@ -517,6 +525,8 @@ def cmd_wait(a):
                     f.unlink()
             if next_hop:
                 extra["next"] = next_hop
+            if hint:
+                extra["hint"] = hint
             if status == "succeeded" and not next_hop:
                 extra["warnings"] = ["no_next_hop"]
             done(status, **extra)
@@ -831,13 +841,13 @@ def main():
     s.add_argument("name", help="agent name")
 
     s = sub.add_parser("prompt", help="send a task or fix file to a worker",
-                       description="Send 'Read .agent/<name>/<file> and do it.' Returns busy while the agent is working.")
+                       description="Send 'Read .agent/<name>/<file> and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input.' Returns busy while the agent is working.")
     s.add_argument("name", help="agent name")
     s.add_argument("file", help="task.md, or fix-N.md for a fix round (max 2)")
     s.add_argument("--answer", action="store_true", help="answer to needs_input; does not count as a round")
 
     s = sub.add_parser("wait", help="wait for a worker's result",
-                       description="Return succeeded/partial/failed/needs_input/malformed/blocked/stalled/over_budget/message, "
+                       description="Return succeeded/partial/failed/needs_input/malformed (with a Status hint)/blocked/stalled/over_budget/message, "
                                    "or running when --timeout passes (call it again).")
     s.add_argument("name", help="agent name")
     s.add_argument("--timeout", type=float, default=280, metavar="SEC", help="seconds before returning running (default: 280)")

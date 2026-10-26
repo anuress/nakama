@@ -31,7 +31,7 @@ You are a reviewer: ...
 | `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
 | `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
 | `nakama resume <name>` | restart a crashed or torn-down worker on its existing worktree and re-prime it from task.md and fix files; returns `fresh_primed` (the conversation itself is not resumed) |
-| `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it.` Returns `busy` (nothing sent) while the agent is still working: `nakama wait` first |
+| `nakama prompt <name> task.md` | sends `Read .agent/<name>/task.md and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input.` Returns `busy` (nothing sent) while the agent is still working: `nakama wait` first |
 | `nakama prompt <name> fix-N.md` | a fix round (max 2; returns `round_limit` after that) |
 | `nakama prompt <name> fix-N.md --answer` | an answer to needs_input; not a round |
 | `nakama wait <name>` | returns within ~5 min; on `running`, call it again. Claude orchestrators: give the Bash tool a timeout above 300000 ms (or pass `--timeout 100`) |
@@ -49,7 +49,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 |---|---|
 | succeeded / partial / failed / needs_input | the agent has settled with a fresh result.md: read `result` and act on the Status, not the wording |
 | tampered | a read-mode worker changed HEAD, the stash or file contents outside .agent/ (pi's read-only mode is only an instruction): reject its result |
-| malformed | result.md has no Status line: treat as failed, or send one fix asking for the format |
+| malformed | result.md has no Status line or uses an unsupported value; `hint` names the allowed values and any bad value |
 | blocked | show `screen` to the user; never answer it yourself (one exception below) |
 | over_budget | read `screen`: progressing → `nakama extend`; looping or stuck → `nakama teardown`, treat as failed |
 | stalled | read `screen`: progressing means the worker is just thinking → wait again or `nakama extend`; looping/stuck → `nakama teardown` |
