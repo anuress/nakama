@@ -878,6 +878,42 @@ class NakamaTest(unittest.TestCase):
         result = self.wait_with_result("Status: succeeded\nNext: review\n")
         self.assertNotIn("steps", result)
 
+    def test_prompt_task_adds_step_progress(self):
+        out = self.stepped(["1/3"])
+        self.nakama("prompt", out["name"], "task.md")
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertIn("Steps 1..1 are committed", prompt[-1])
+        self.assertIn("continue at step 2 of ## Steps", prompt[-1])
+
+    def test_prompt_fix_file_has_no_step_progress(self):
+        out = self.stepped(["1/3"])
+        Path(out["dir"], "fix-1.md").write_text("## Goal\nfix\n")
+        self.nakama("prompt", out["name"], "fix-1.md")
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertNotIn("continue at step", prompt[-1])
+
+    def test_resume_mentions_dirty_tree_and_steps(self):
+        out = self.stepped(["1/3", "2/3"])
+        tracked = Path(out["worktree"], "tracked.txt")
+        tracked.write_text("clean\n")
+        self.wgit(out["worktree"], "add", "tracked.txt")
+        self.wgit(out["worktree"], "commit", "-q", "-m", "track file")
+        tracked.write_text("dirty\n")
+        self.nakama("teardown", out["name"])
+        self.set_state(status=None)
+        self.nakama("resume", out["name"])
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertIn("continue at step 3", prompt[-1])
+        self.assertIn("uncommitted changes", prompt[-1])
+
+    def test_resume_ignores_agent_dir_when_checking_dirty(self):
+        out = self.stepped(["1/3"])
+        self.nakama("teardown", out["name"])
+        self.set_state(status=None)
+        self.nakama("resume", out["name"])
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertNotIn("uncommitted changes", prompt[-1])
+
     def test_wait_returns_valid_next_hop(self):
         result = self.wait_with_result("Status: succeeded\nNext: review\n")
         self.assertEqual((result["status"], result["next"]), ("succeeded", "review"))

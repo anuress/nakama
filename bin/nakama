@@ -327,6 +327,31 @@ def steps_info(rec):
     return {"done": steps_done(rec), "total": total, "reported": reported}
 
 
+def worktree_dirty(rec):
+    try:
+        result = run(["git", "status", "--porcelain", "--", ".", ":(exclude).agent"],
+                     cwd=rec["worktree"], check=False)
+    except OSError:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def progress_note(rec, dirty=True):
+    parts = []
+    total = task_steps(rec)
+    done = steps_done(rec) if total else None
+    if total and done is not None:
+        if done:
+            parts.append(f" Steps 1..{done} are committed (Nakama-Step trailers); "
+                         f"continue at step {done + 1} of ## Steps.")
+        else:
+            parts.append(" No step is committed yet; start at step 1 of ## Steps.")
+    if dirty and worktree_dirty(rec):
+        parts.append(" The worktree has uncommitted changes from before the pause: read ## Resume in "
+                     "result.md and git diff, continue from there, and do not discard them.")
+    return "".join(parts)
+
+
 def git_state(rec):
     """HEAD, stash list and a content hash of the tree (minus .agent/) of the worker's checkout; None if not git."""
     def git(*args, cwd=rec["worktree"], env=None):
@@ -499,7 +524,8 @@ def cmd_resume(a):
     if state is None:
         if not rec.get("closed"):
             close_worker_surface(rec)
-        rec.update(closed=False, prompted_at=None, nudged_at=None, extended_min=0,
+        rec.update(closed=False, paused=False, paused_forced=False, pause_sent_at=None,
+                   prompted_at=None, nudged_at=None, extended_min=0,
                    screen_sig=None, screen_changed_at=None)
         started = start_worker(rec, meta, layout, rec.get("direction", "right"))
         if started.returncode != 0:
@@ -509,6 +535,7 @@ def cmd_resume(a):
     message = ("You are being resumed after a restart. Re-read "
                f".agent/{rec['name']}/task.md and every fix-*.md next to it, check `git log` and `git status` "
                "in this worktree to see what is already done, then continue and write result.md as required.")
+    message += progress_note(rec)
     prompted_at = time.time()
     # A read worker keeps its original baseline, so a reviewer crash does not forgive what it did before.
     before = rec["git_before"] if rec["mode"] == "read" and rec.get("git_before") else git_state(rec)
@@ -516,6 +543,7 @@ def cmd_resume(a):
     if prompted.returncode != 0:
         emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
     rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
+               paused=False, paused_forced=False, pause_sent_at=None,
                screen_sig=None, screen_changed_at=None)
     save(rec)
     emit({"name": rec["name"], "status": "fresh_primed", "pane": rec["pane"],
@@ -537,8 +565,10 @@ def cmd_prompt(a):
     prompted_at = time.time()
     # The review receipt and, for read-only workers, the baseline their effect is checked against.
     before = git_state(rec)
-    run(["herdr", "agent", "prompt", rec["name"],
-         f"Read {rel} and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input."])
+    message = f"Read {rel} and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input."
+    if task.name == "task.md":
+        message += progress_note(rec, dirty=False)
+    run(["herdr", "agent", "prompt", rec["name"], message])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
     rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
                screen_sig=None, screen_changed_at=None)
