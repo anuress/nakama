@@ -97,6 +97,8 @@ nakama wait b1-fix-login             # repeat while it says running
 nakama teardown b1-fix-login
 ```
 
+For tasks too large for one session but touching the same files, define ordered `## Steps` in `task.md` and commit each checked step with a `Nakama-Step: <k>/<N>` trailer. To pause, `nakama pause <name>|--all` asks builders to leave changes uncommitted and write `## Resume`, then closes their tabs; `nakama resume <name>` continues from the retained worktree.
+
 ## Roles
 
 A role is a markdown file: frontmatter plus a persona. Bundled ones live in
