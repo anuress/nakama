@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -885,6 +886,13 @@ class NakamaTest(unittest.TestCase):
         self.assertIn("Steps 1..1 are committed", prompt[-1])
         self.assertIn("continue at step 2 of ## Steps", prompt[-1])
 
+    def test_prompt_task_reports_all_steps_complete(self):
+        out = self.stepped(["1/3", "2/3", "3/3"])
+        self.nakama("prompt", out["name"], "task.md")
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertIn("All 3 steps are committed (Nakama-Step trailers); run the full ## Acceptance.", prompt[-1])
+        self.assertNotIn("step 4", prompt[-1])
+
     def test_prompt_fix_file_has_no_step_progress(self):
         out = self.stepped(["1/3"])
         Path(out["dir"], "fix-1.md").write_text("## Goal\nfix\n")
@@ -911,6 +919,15 @@ class NakamaTest(unittest.TestCase):
         self.nakama("teardown", out["name"])
         self.set_state(status=None)
         self.nakama("resume", out["name"])
+        prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
+        self.assertNotIn("uncommitted changes", prompt[-1])
+
+    def test_resume_read_reviewer_ignores_builder_dirty_tree(self):
+        builder, reviewer = self.read_review()
+        Path(builder["worktree"], "tracked.txt").write_text("dirty\n")
+        self.nakama("teardown", reviewer["name"])
+        self.set_state(status=None)
+        self.nakama("resume", reviewer["name"])
         prompt = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]][-1]
         self.assertNotIn("uncommitted changes", prompt[-1])
 
@@ -1253,6 +1270,30 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertIn("read", result["error"])
         self.assertFalse(any(c[1:3] in (["tab", "close"], ["pane", "close"]) for c in self.calls()))
 
+    def test_pause_all_skips_missing_worktree_without_aborting_others(self):
+        live, missing = self.launch(), self.launch()
+        shutil.rmtree(missing["worktree"])
+        missing_record = self.root / "records" / f"{missing['name']}.json"
+        before = missing_record.read_text()
+        self.set_state(status=None, statuses={live["name"]: "working", missing["name"]: "working"})
+        rc, result = self.nakama("pause", "--all", "--timeout", "0")
+        self.assertEqual(rc, 0, result)
+        entries = {entry["name"]: entry for entry in result["results"]}
+        self.assertEqual(entries[missing["name"]], {
+            "name": missing["name"], "status": "skipped", "reason": "no_worktree"})
+        self.assertEqual(entries[live["name"]]["status"], "paused_forced")
+        self.assertEqual(missing_record.read_text(), before)
+        self.assertTrue(self.record(live["name"])["paused"])
+
+    def test_pause_named_worker_without_worktree_fails_cleanly(self):
+        out = self.launch()
+        shutil.rmtree(out["worktree"])
+        before = self.calls()
+        rc, result = self.nakama("pause", out["name"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(result["error"], f"{out['name']}: worktree {out['worktree']} does not exist")
+        self.assertEqual(self.calls()[len(before):], [])
+
     def test_pause_all_skips_read_only_and_settled_and_other_sessions(self):
         builder_a, builder_b = self.launch(), self.launch()
         self.task(builder_a)
@@ -1335,6 +1376,11 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(rc, 0)
         self.assertEqual(result["status"], "closed")
         self.assertTrue(result["worktree_removed"])
+        rec = self.record(out["name"])
+        self.assertFalse(rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+        self.assertIsNone(rec["pause_sent_at"])
+        self.assertEqual(self.nakama("sweep")[1]["paused_workers"], [])
 
     def test_teardown_without_removal_allows_paused_worker(self):
         out = self.launch()

@@ -342,12 +342,14 @@ def progress_note(rec, dirty=True):
     total = task_steps(rec)
     done = steps_done(rec) if total else None
     if total and done is not None:
-        if done:
+        if done >= total:
+            parts.append(f" All {total} steps are committed (Nakama-Step trailers); run the full ## Acceptance.")
+        elif done:
             parts.append(f" Steps 1..{done} are committed (Nakama-Step trailers); "
                          f"continue at step {done + 1} of ## Steps.")
         else:
             parts.append(" No step is committed yet; start at step 1 of ## Steps.")
-    if dirty and worktree_dirty(rec):
+    if dirty and rec.get("mode") == "write" and worktree_dirty(rec):
         parts.append(" The worktree has uncommitted changes from before the pause: read ## Resume in "
                      "result.md and git diff, continue from there, and do not discard them.")
     return "".join(parts)
@@ -782,6 +784,8 @@ def cmd_pause(a):
             emit({"error": f"{rec['name']} is read-only and cannot be paused"}, 2)
         if rec["closed"]:
             emit({"error": f"{rec['name']} is already closed"}, 2)
+        if not Path(rec["worktree"]).is_dir():
+            emit({"error": f"{rec['name']}: worktree {rec['worktree']} does not exist"}, 2)
         selected = [rec]
 
     results = {}
@@ -789,6 +793,9 @@ def cmd_pause(a):
     for rec in selected:
         if rec["mode"] == "read":
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "read_only"}
+            continue
+        if not Path(rec["worktree"]).is_dir():
+            results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "no_worktree"}
             continue
         state = agent_status(rec["name"])
         if state in ("idle", "done", None) and fresh_result(rec)[0] is not None:
@@ -862,6 +869,8 @@ def cmd_teardown(a):
                 reason = (result.stderr + result.stdout)[-300:].strip()
         else:
             reason = "no worktree owned by this agent"
+    if removed:
+        rec.update(paused=False, paused_forced=False, pause_sent_at=None)
     rec["closed"] = True
     save(rec)
     out = {"name": rec["name"], "status": "closed", "worktree_removed": removed}
