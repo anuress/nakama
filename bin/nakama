@@ -17,6 +17,7 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("NAKAMA_STATE_DIR", str(HOME / ".local/state/nakama")))
 GRACE_SEC = float(os.environ.get("NAKAMA_GRACE_SEC", "20"))
 POLL_SEC = float(os.environ.get("NAKAMA_POLL_SEC", "2"))
+PAUSE_SEC = 300
 
 # User roles override bundled roles with the same name.
 USER_ROLES_DIR = Path(os.environ.get("NAKAMA_USER_ROLES_DIR", str(HOME / ".config/nakama/roles")))
@@ -333,7 +334,7 @@ def worktree_dirty(rec):
                      cwd=rec["worktree"], check=False)
     except OSError:
         return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return result.returncode == 0 and bool(result.stdout)
 
 
 def progress_note(rec, dirty=True):
@@ -768,6 +769,75 @@ def cmd_extend(a):
           "extended_min": rec["extended_min"]})
 
 
+def cmd_pause(a):
+    require_herdr()
+    if (a.all and a.name) or (not a.all and not a.name):
+        emit({"error": "provide exactly one of a worker name or --all"}, 2)
+    if a.all:
+        selected = [rec for rec in open_records()
+                    if record_session(rec) == session_key(current_session())]
+    else:
+        rec = load(a.name)
+        if rec["mode"] == "read":
+            emit({"error": f"{rec['name']} is read-only and cannot be paused"}, 2)
+        if rec["closed"]:
+            emit({"error": f"{rec['name']} is already closed"}, 2)
+        selected = [rec]
+
+    results = {}
+    pending = []
+    for rec in selected:
+        if rec["mode"] == "read":
+            results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "read_only"}
+            continue
+        state = agent_status(rec["name"])
+        if state in ("idle", "done", None) and fresh_result(rec)[0] is not None:
+            results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "settled"}
+            continue
+        pause_file = agent_dir(rec) / "pause.md"
+        pause_file.write_text(
+            "Pause now. Do not commit and do not stash: leave your changes in the worktree.\n"
+            "Write result.md next to your task file with Status: partial, Next: retry, a Steps: k/N line if the task "
+            "has ## Steps, and a ## Resume section: what was in flight, the exact next action, and the "
+            "uncommitted files and their state. Then stop.\n")
+        sent_at = time.time()
+        send_one(ORCH, rec["name"], "info", pause_file, None)
+        rec["pause_sent_at"] = sent_at
+        save(rec)
+        pending.append((rec, sent_at))
+
+    had_recipients = bool(pending)
+    deadline = time.time() + a.timeout
+    noted = set()
+    while pending:
+        for rec, sent_at in pending:
+            result = agent_dir(rec) / "result.md"
+            if (result.is_file() and result.stat().st_mtime > sent_at
+                    and agent_status(rec["name"]) in ("idle", "done", None)):
+                noted.add(rec["name"])
+        pending = [(rec, sent_at) for rec, sent_at in pending if rec["name"] not in noted]
+        remaining = deadline - time.time()
+        if not pending or remaining <= 0:
+            break
+        time.sleep(min(max(POLL_SEC, 0.01), remaining))
+
+    for rec in selected:
+        if rec["name"] in results:
+            continue
+        was_noted = rec["name"] in noted
+        close_worker_surface(rec)
+        rec.update(closed=True, paused=True, paused_forced=not was_noted)
+        save(rec)
+        results[rec["name"]] = {
+            "name": rec["name"], "status": "paused" if was_noted else "paused_forced",
+            "steps": steps_info(rec), "dirty": worktree_dirty(rec),
+        }
+    ordered = [results[rec["name"]] for rec in selected]
+    if a.all:
+        emit({"status": "paused" if had_recipients else "no_recipients", "results": ordered})
+    emit(ordered[0])
+
+
 def cmd_teardown(a):
     if a.force and not a.remove_worktree:
         emit({"error": "--force requires --remove-worktree"}, 2)
@@ -968,6 +1038,16 @@ def main():
     s.add_argument("name", help="agent name")
     s.add_argument("minutes", type=int, help="minutes to add")
 
+    s = sub.add_parser(
+        "pause", help="ask builders to stop now, write a Resume note and leave changes uncommitted; "
+                      "closes their tab, keeps the worktree",
+        description="Ask builders to stop now, write a Resume note and leave changes uncommitted; "
+                    "closes their tab, keeps the worktree. Use --all for open workers in this session.")
+    s.add_argument("name", nargs="?", help="worker name (omit when using --all)")
+    s.add_argument("--all", action="store_true", help="pause open workers in this session")
+    s.add_argument("--timeout", type=float, default=PAUSE_SEC, metavar="SEC",
+                   help="seconds to wait for a Resume note (default: 300)")
+
     s = sub.add_parser("teardown", help="stop a worker and close its tab")
     s.add_argument("name", help="agent name")
     s.add_argument("--remove-worktree", action="store_true", help="also remove its worktree (the branch is kept)")
@@ -984,7 +1064,7 @@ def main():
     s.add_argument("patterns", nargs="+", help="gitignore-style patterns")
     a = p.parse_args()
     {"launch": cmd_launch, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
-     "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
+     "pause": cmd_pause, "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
      "doctor": cmd_doctor, "init": cmd_init}[a.cmd](a)
 
 

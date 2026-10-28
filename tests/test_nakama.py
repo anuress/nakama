@@ -453,7 +453,7 @@ class NakamaTest(unittest.TestCase):
     def test_help_describes_every_command(self):
         text = self.help_text()
         self.assertNotIn("{launch,", text)
-        for command in ("launch", "resume", "prompt", "wait", "send", "inbox", "extend", "teardown", "list", "sweep", "roles", "doctor", "init"):
+        for command in ("launch", "resume", "prompt", "wait", "send", "inbox", "extend", "pause", "teardown", "list", "sweep", "roles", "doctor", "init"):
             line = next((l for l in text.splitlines() if l.strip().startswith(command + " ")), "")
             self.assertTrue(line.split(command, 1)[1].strip(), f"no description for {command}")
 
@@ -1199,6 +1199,123 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         res = self.nakama("wait", out["name"], "--timeout", "0")[1]
         self.assertEqual(res["status"], "blocked")
         self.assertIn("Allow execution?", res["screen"])
+
+    def test_pause_waits_for_note_then_closes_and_keeps_worktree(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: partial\n## Resume\nfinish the current edit\n"})
+        rc, result = self.nakama("pause", out["name"], "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(result, {"name": out["name"], "status": "paused", "steps": None, "dirty": False})
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+        self.assertIn(["herdr", "tab", "close", rec["tab"]], self.calls())
+        self.assertFalse(any(c[0] == "wt" and c[1] == "remove" for c in self.calls()))
+        pause_message = Path(out["dir"], "pause.md").read_text()
+        self.assertIn("Do not commit", pause_message)
+        self.assertIn("Next: retry", pause_message)
+
+    def test_pause_forced_when_no_note_before_timeout(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        rc, result = self.nakama("pause", out["name"], "--timeout", "0")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused_forced")
+        rec = self.record(out["name"])
+        self.assertTrue(rec["paused_forced"])
+        self.assertIn(["herdr", "tab", "close", rec["tab"]], self.calls())
+        self.assertTrue(Path(out["worktree"]).is_dir())
+        self.assertFalse(any(c[0] == "wt" and c[1] == "remove" for c in self.calls()))
+
+    def test_pause_skips_named_settled_worker(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: succeeded\nNext: review\n"})
+        self.nakama("prompt", out["name"], "task.md")
+        record_path = self.root / "records" / f"{out['name']}.json"
+        before = record_path.read_text()
+        rc, result = self.nakama("pause", out["name"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(result, {"name": out["name"], "status": "skipped", "reason": "settled"})
+        self.assertEqual(record_path.read_text(), before)
+        self.assertFalse(Path(out["dir"], "pause.md").exists())
+
+    def test_pause_refuses_read_only_worker(self):
+        reviewer = self.nakama("launch", "reviewer", "review", "--no-worktree")[1]
+        rc, result = self.nakama("pause", reviewer["name"])
+        self.assertEqual(rc, 2)
+        self.assertIn("read", result["error"])
+        self.assertFalse(any(c[1:3] in (["tab", "close"], ["pane", "close"]) for c in self.calls()))
+
+    def test_pause_all_skips_read_only_and_settled_and_other_sessions(self):
+        builder_a, builder_b = self.launch(), self.launch()
+        self.task(builder_a)
+        self.task(builder_b)
+        reviewer = self.nakama("launch", "reviewer", "review", "--no-worktree")[1]
+        env_other = {**self.env, "HERDR_PANE_ID": "other-session"}
+        builder_c = self.nakama("launch", "builder", "other", env=env_other)[1]
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(builder_b), "text": "Status: succeeded\nNext: review\n"})
+        self.nakama("prompt", builder_b["name"], "task.md")
+        self.set_state(status=None, statuses={builder_a["name"]: "working", builder_b["name"]: "idle",
+                                             reviewer["name"]: "working", builder_c["name"]: "working"})
+        rc, result = self.nakama("pause", "--all", "--timeout", "0")
+        self.assertEqual(rc, 0, result)
+        entries = {entry["name"]: entry for entry in result["results"]}
+        self.assertEqual(set(entries), {builder_a["name"], builder_b["name"], reviewer["name"]})
+        self.assertEqual(entries[builder_a["name"]]["status"], "paused_forced")
+        self.assertEqual(entries[builder_b["name"]], {
+            "name": builder_b["name"], "status": "skipped", "reason": "settled"})
+        self.assertEqual(entries[reviewer["name"]], {
+            "name": reviewer["name"], "status": "skipped", "reason": "read_only"})
+        self.assertFalse(self.record(builder_b["name"])["closed"])
+        self.assertFalse(self.record(builder_b["name"]).get("paused", False))
+        self.assertNotIn(builder_c["name"], entries)
+
+    def test_pause_all_uses_one_shared_deadline(self):
+        workers = [self.launch() for _ in range(3)]
+        self.set_state(status=None, statuses={worker["name"]: "working" for worker in workers})
+        started = time.monotonic()
+        rc, result = self.nakama("pause", "--all", "--timeout", "1")
+        elapsed = time.monotonic() - started
+        self.assertEqual(rc, 0, result)
+        self.assertLess(elapsed, 2.5)
+        self.assertEqual([worker["status"] for worker in result["results"]], ["paused_forced"] * 3)
+
+    def test_resume_after_pause_clears_paused_flags(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"], "paused_forced")
+        self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
+        rec = self.record(out["name"])
+        self.assertFalse(rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+        self.assertIsNone(rec["pause_sent_at"])
+
+    def test_pause_requires_exactly_one_name_or_all(self):
+        rc, missing = self.nakama("pause")
+        self.assertEqual(rc, 2)
+        self.assertIn("exactly one", missing["error"])
+        out = self.launch()
+        rc, both = self.nakama("pause", out["name"], "--all")
+        self.assertEqual(rc, 2)
+        self.assertIn("exactly one", both["error"])
+
+    def test_pause_all_without_workers_reports_no_recipients(self):
+        self.assertEqual(self.nakama("pause", "--all", "--timeout", "0")[1],
+                         {"status": "no_recipients", "results": []})
+
+    def test_pause_help_describes_its_effect(self):
+        text = self.help_text("pause")
+        for phrase in ("--all", "Resume note", "uncommitted", "keeps the worktree"):
+            self.assertIn(phrase, text)
 
     def test_teardown_removes_only_the_gh_config_dir_it_created(self):
         out = self.launch()
