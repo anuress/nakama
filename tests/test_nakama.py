@@ -690,6 +690,24 @@ class NakamaTest(unittest.TestCase):
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=worktree, check=True,
                               capture_output=True, text=True, env=self.env).stdout.strip()
 
+    def stepped(self, trailers, base_trailers=()):
+        self.wgit(self.root, "init", "-q", "-b", "main")
+        self.wgit(self.root, "commit", "-q", "--allow-empty", "-m", "root")
+        out = self.launch()
+        worktree = out["worktree"]
+        self.wgit(worktree, "init", "-q", "-b", "main")
+        self.wgit(worktree, "commit", "-q", "--allow-empty", "-m", "root")
+        for i, trailer in enumerate(base_trailers):
+            self.wgit(worktree, "commit", "-q", "--allow-empty", "-m", f"base {i}",
+                      "--trailer", f"Nakama-Step: {trailer}")
+        self.wgit(worktree, "checkout", "-q", "-b", "work")
+        for i, trailer in enumerate(trailers):
+            self.wgit(worktree, "commit", "-q", "--allow-empty", "-m", f"step {i}",
+                      "--trailer", f"Nakama-Step: {trailer}")
+        Path(out["dir"], "task.md").write_text(
+            "## Goal\nx\n## Steps\n1. a — check: true\n2. b — check: true\n3. c — check: true\n## Acceptance\n- true\n")
+        return out
+
     def read_review(self, prepare=None):
         """A read-only reviewer joined to a builder whose worktree is a real git repo with one tracked file."""
         builder = self.launch()
@@ -819,6 +837,46 @@ class NakamaTest(unittest.TestCase):
         self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": text})
         self.nakama("prompt", out["name"], "task.md")
         return self.nakama("wait", out["name"], "--timeout", "5")[1]
+
+    def test_launch_records_current_branch_as_base_when_base_is_head(self):
+        self.wgit(self.root, "init", "-q", "-b", "main")
+        self.wgit(self.root, "commit", "-q", "--allow-empty", "-m", "root")
+        out = self.launch()
+        self.assertEqual(self.record(out["name"])["base"], "main")
+
+    def test_launch_records_explicit_base_and_none_for_join(self):
+        out = self.launch("--base", "develop")
+        self.assertEqual(self.record(out["name"])["base"], "develop")
+        rev = self.nakama("launch", "reviewer", "r", "--join", out["name"])[1]
+        self.assertIsNone(self.record(rev["name"]).get("base"))
+
+    def test_wait_reports_steps_from_trailers_and_result(self):
+        out = self.stepped(["1/3", "2/3"])
+        text = "Status: partial\nSteps: 2/3\n"
+        self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": text})
+        self.nakama("prompt", out["name"], "task.md")
+        result = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(result["steps"], {"done": 2, "total": 3, "reported": "2/3"})
+        self.assertNotIn("steps_mismatch", result.get("warnings", []))
+
+    def test_wait_warns_on_steps_mismatch(self):
+        out = self.stepped(["1/3"])
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: partial\nSteps: 2/3\n"})
+        self.nakama("prompt", out["name"], "task.md")
+        result = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertIn("steps_mismatch", result["warnings"])
+
+    def test_steps_count_ignores_base_commits_with_trailers(self):
+        out = self.stepped(["2/3"], base_trailers=["1/3"])
+        self.set_state(status="idle", write_on_prompt={"path": self.result(out), "text": "Status: partial\n"})
+        self.nakama("prompt", out["name"], "task.md")
+        result = self.nakama("wait", out["name"], "--timeout", "5")[1]
+        self.assertEqual(result["steps"]["done"], 1)
+
+    def test_wait_without_steps_section_has_no_steps_key(self):
+        result = self.wait_with_result("Status: succeeded\nNext: review\n")
+        self.assertNotIn("steps", result)
 
     def test_wait_returns_valid_next_hop(self):
         result = self.wait_with_result("Status: succeeded\nNext: review\n")

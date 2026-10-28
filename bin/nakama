@@ -39,6 +39,7 @@ SEND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 STATUS_VALUES = ("succeeded", "partial", "failed", "needs_input")
 STATUS_VALUE_RE = re.compile(r"^(" + "|".join(STATUS_VALUES) + r")\b")
 STATUS_LINE_RE = re.compile(r"^(?:\*\*)?Status:[ \t]*(.*?)(?:\*\*)?[ \t]*$", re.M)
+STEPS_LINE_RE = re.compile(r"^(?:\*\*)?Steps:[ \t]*(\d+)/(\d+)(?:\*\*)?[ \t]*$", re.M)
 NEXT_RE = re.compile(r"^(?:\*\*)?Next:[ \t]*(\S+?)(?:\*\*)?[ \t]*$", re.M)
 NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
 
@@ -276,6 +277,56 @@ def fresh_result(rec):
     return (status_match.group(1) if status_match else "malformed"), next_hop, hint
 
 
+def task_steps(rec):
+    task = agent_dir(rec) / "task.md"
+    if not task.is_file():
+        return 0
+    lines = task.read_text().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.rstrip() == "## Steps"), None)
+    if start is None:
+        return 0
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    count = 0
+    for line in lines[start + 1:end]:
+        stripped = line.lstrip()
+        number, dot, rest = stripped.partition(".")
+        if dot and number.isdecimal() and rest[:1].isspace():
+            count += 1
+    return count
+
+
+def steps_done(rec):
+    if not rec.get("base") or not rec.get("worktree"):
+        return None
+    try:
+        merge_base = run(["git", "merge-base", rec["base"], "HEAD"], cwd=rec["worktree"], check=False)
+        if merge_base.returncode != 0 or not merge_base.stdout.strip():
+            return None
+        log = run(["git", "log", f"{merge_base.stdout.strip()}..HEAD",
+                   "--format=%(trailers:key=Nakama-Step,valueonly)"], cwd=rec["worktree"], check=False)
+    except OSError:
+        return None
+    if log.returncode != 0:
+        return None
+    done = set()
+    for value in log.stdout.splitlines():
+        try:
+            done.add(int(value.strip().split("/", 1)[0]))
+        except ValueError:
+            pass
+    return len(done)
+
+
+def steps_info(rec):
+    total = task_steps(rec)
+    if not total:
+        return None
+    result = agent_dir(rec) / "result.md"
+    match = STEPS_LINE_RE.search(result.read_text()) if result.is_file() else None
+    reported = f"{match.group(1)}/{match.group(2)}" if match else None
+    return {"done": steps_done(rec), "total": total, "reported": reported}
+
+
 def git_state(rec):
     """HEAD, stash list and a content hash of the tree (minus .agent/) of the worker's checkout; None if not git."""
     def git(*args, cwd=rec["worktree"], env=None):
@@ -389,6 +440,7 @@ def cmd_launch(a):
     taken = set(live_names()) | {r["name"] for r in records()}
     name = pick_name(meta, a.slug, taken, a.name)
     branch = None
+    base = None
     kind = a.kind or meta["kind"]
     model = a.model or (meta["model"] if kind == meta["kind"] else None)
     if a.join:
@@ -405,10 +457,14 @@ def cmd_launch(a):
         worktree = find_key(
             parse_external_json(out, "wt switch", {WT_PATH_KEY: str}), WT_PATH_KEY)
         run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree)
+        base = a.base
+        if base == "HEAD":
+            ref = run(["git", "symbolic-ref", "--short", "-q", "HEAD"], check=False).stdout.strip()
+            base = ref or run(["git", "rev-parse", "HEAD"], check=False).stdout.strip() or None
     rec = {
         "name": name, "role": a.role, "kind": kind, "model": model,
         "mode": meta["mode"], "pane": None, "tab": None, "layout": a.layout,
-        "direction": a.direction, "worktree": worktree, "branch": branch,
+        "direction": a.direction, "worktree": worktree, "branch": branch, "base": base,
         "budget_min": a.budget or meta["budget"], "extended_min": 0, "prompted_at": None,
         "nudged_at": None, "screen_sig": None, "screen_changed_at": None,
         "rounds": 0, "closed": False, "orch_pane": launcher_orch_pane(),
@@ -531,6 +587,11 @@ def cmd_wait(a):
                 extra["hint"] = hint
             if status == "succeeded" and not next_hop:
                 extra["warnings"] = ["no_next_hop"]
+            if info := steps_info(rec):
+                extra["steps"] = info
+                if (info["reported"] and info["done"] is not None
+                        and int(info["reported"].split("/", 1)[0]) != info["done"]):
+                    extra.setdefault("warnings", []).append("steps_mismatch")
             done(status, **extra)
         # Unread mail makes every wait return at once: read it with nakama inbox.
         if mail := unread(me):
