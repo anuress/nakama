@@ -842,6 +842,9 @@ def cmd_teardown(a):
     if a.force and not a.remove_worktree:
         emit({"error": "--force requires --remove-worktree"}, 2)
     rec = load(a.name)
+    if a.remove_worktree and rec.get("paused") and not a.force:
+        emit({"error": f"{rec['name']} is paused: its worktree holds uncommitted work; "
+                       "resume it, or pass --force to discard"}, 2)
     run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
     close_worker_surface(rec)
     removed = False
@@ -896,8 +899,12 @@ def cmd_sweep(a):
     trees = find_key(listed, "items")
     branches = [t["branch"] for t in trees
                 if isinstance(t.get("branch"), str) and t["branch"].startswith("agent/")]
+    paused = [r for r in records() if r.get("paused")]
+    if not a.all:
+        paused = [r for r in paused if record_session(r) == session_key(current_session())]
     emit({"open_records": [{"name": r["name"], "state": agent_status(r["name"])} for r in recs],
-          "stray_agents": stray, "agent_worktrees": branches})
+          "stray_agents": stray, "agent_worktrees": branches,
+          "paused_workers": [{"name": r["name"], "worktree": r["worktree"]} for r in paused]})
 
 
 def cmd_roles(a):

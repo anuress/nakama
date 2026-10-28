@@ -1317,6 +1317,55 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         for phrase in ("--all", "Resume note", "uncommitted", "keeps the worktree"):
             self.assertIn(phrase, text)
 
+    def test_teardown_remove_worktree_refuses_paused_worker(self):
+        out = self.launch()
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        before = self.calls()
+        rc, result = self.nakama("teardown", out["name"], "--remove-worktree")
+        self.assertEqual(rc, 2)
+        self.assertIn("is paused", result["error"])
+        self.assertEqual(self.calls()[len(before):], [])
+
+    def test_teardown_force_removes_paused_worktree(self):
+        out = self.launch()
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        rc, result = self.nakama("teardown", out["name"], "--remove-worktree", "--force")
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["status"], "closed")
+        self.assertTrue(result["worktree_removed"])
+
+    def test_teardown_without_removal_allows_paused_worker(self):
+        out = self.launch()
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        rc, result = self.nakama("teardown", out["name"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["status"], "closed")
+        self.assertFalse(any(c[0] == "wt" and c[1] == "remove" for c in self.calls()))
+
+    def test_sweep_lists_paused_workers(self):
+        out = self.launch()
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        result = self.nakama("sweep")[1]
+        self.assertEqual(result["paused_workers"], [{"name": out["name"], "worktree": out["worktree"]}])
+
+    def test_sweep_paused_workers_filters_sessions_unless_all_requested(self):
+        current = {**self.env, "NAKAMA_SESSION": "session-current"}
+        other = {**self.env, "NAKAMA_SESSION": "session-other", "HERDR_PANE_ID": "other-session"}
+        first = self.nakama("launch", "builder", "first", env=current)[1]
+        second = self.nakama("launch", "builder", "second", env=other)[1]
+        self.set_state(status=None, statuses={first["name"]: "working", second["name"]: "working"})
+        self.nakama("pause", first["name"], "--timeout", "0", env=current)
+        self.nakama("pause", second["name"], "--timeout", "0", env=other)
+        current_sweep = self.nakama("sweep", env=current)[1]
+        all_sweep = self.nakama("sweep", "--all", env=current)[1]
+        self.assertEqual([worker["name"] for worker in current_sweep["paused_workers"]], [first["name"]])
+        self.assertEqual({worker["name"] for worker in all_sweep["paused_workers"]},
+                         {first["name"], second["name"]})
+
     def test_teardown_removes_only_the_gh_config_dir_it_created(self):
         out = self.launch()
         record = self.root / "records" / f"{out['name']}.json"
