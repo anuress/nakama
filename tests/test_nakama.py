@@ -1294,6 +1294,32 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(result["error"], f"{out['name']}: worktree {out['worktree']} does not exist")
         self.assertEqual(self.calls()[len(before):], [])
 
+    def test_pause_all_skips_missing_agent_dir_without_aborting_others(self):
+        live, missing = self.launch(), self.launch()
+        shutil.rmtree(missing["dir"])
+        missing_record = self.root / "records" / f"{missing['name']}.json"
+        before = missing_record.read_text()
+        self.set_state(status=None, statuses={live["name"]: "working", missing["name"]: "working"})
+        rc, result = self.nakama("pause", "--all", "--timeout", "0")
+        self.assertEqual(rc, 0, result)
+        entries = {entry["name"]: entry for entry in result["results"]}
+        self.assertEqual(entries[missing["name"]], {
+            "name": missing["name"], "status": "skipped", "reason": "no_worktree"})
+        self.assertEqual(entries[live["name"]]["status"], "paused_forced")
+        self.assertEqual(missing_record.read_text(), before)
+        self.assertFalse(Path(missing["dir"]).exists())
+        self.assertTrue(self.record(live["name"])["paused"])
+
+    def test_pause_named_worker_without_agent_dir_fails_cleanly(self):
+        out = self.launch()
+        shutil.rmtree(out["dir"])
+        before = self.calls()
+        rc, result = self.nakama("pause", out["name"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(result["error"], f"{out['name']}: worktree {out['worktree']} does not exist")
+        self.assertEqual(self.calls()[len(before):], [])
+        self.assertFalse(Path(out["dir"]).exists())
+
     def test_pause_all_skips_read_only_and_settled_and_other_sessions(self):
         builder_a, builder_b = self.launch(), self.launch()
         self.task(builder_a)
@@ -1397,6 +1423,14 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.nakama("pause", out["name"], "--timeout", "0")
         result = self.nakama("sweep")[1]
         self.assertEqual(result["paused_workers"], [{"name": out["name"], "worktree": out["worktree"]}])
+
+    def test_sweep_omits_paused_workers_with_missing_worktree(self):
+        out = self.launch()
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        shutil.rmtree(out["worktree"])
+        result = self.nakama("sweep")[1]
+        self.assertEqual(result["paused_workers"], [])
 
     def test_sweep_paused_workers_filters_sessions_unless_all_requested(self):
         current = {**self.env, "NAKAMA_SESSION": "session-current"}

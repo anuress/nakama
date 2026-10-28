@@ -784,7 +784,7 @@ def cmd_pause(a):
             emit({"error": f"{rec['name']} is read-only and cannot be paused"}, 2)
         if rec["closed"]:
             emit({"error": f"{rec['name']} is already closed"}, 2)
-        if not Path(rec["worktree"]).is_dir():
+        if not agent_dir(rec).is_dir():
             emit({"error": f"{rec['name']}: worktree {rec['worktree']} does not exist"}, 2)
         selected = [rec]
 
@@ -794,7 +794,7 @@ def cmd_pause(a):
         if rec["mode"] == "read":
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "read_only"}
             continue
-        if not Path(rec["worktree"]).is_dir():
+        if not agent_dir(rec).is_dir():
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "no_worktree"}
             continue
         state = agent_status(rec["name"])
@@ -908,7 +908,7 @@ def cmd_sweep(a):
     trees = find_key(listed, "items")
     branches = [t["branch"] for t in trees
                 if isinstance(t.get("branch"), str) and t["branch"].startswith("agent/")]
-    paused = [r for r in records() if r.get("paused")]
+    paused = [r for r in records() if r.get("paused") and Path(r["worktree"]).is_dir()]
     if not a.all:
         paused = [r for r in paused if record_session(r) == session_key(current_session())]
     emit({"open_records": [{"name": r["name"], "state": agent_status(r["name"])} for r in recs],
