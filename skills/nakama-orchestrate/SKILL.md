@@ -36,8 +36,9 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 - succeeded → step 4.
 - needs_input → answer it if you know the answer, else ask the user; write fix-N.md and prompt with `--answer`.
 - stalled → inspect `screen`: progressing → wait again or extend; looping/stuck → teardown and record the task as stopped.
-- failed / malformed / unstepped or empty `partial` (no committed step) → teardown; record the task as stopped.
-- stepped `partial` with `steps.done > 0` → handle the cause (`nakama extend` or answer the ask), then run `nakama prompt <name> task.md` if the worker is live or `nakama resume <name>` if gone or paused; no fix round is spent.
+- failed / malformed / unstepped or empty `partial` → teardown; record the task as stopped.
+- Treat null `steps.done` as no committed step known; it goes to teardown unless both `result.md`'s `Steps:` and `git log` confirm committed steps.
+- stepped `partial` with `steps.done > 0`, or a null count confirmed by that evidence → handle the cause (`nakama extend` or answer the ask), then run `nakama prompt <name> task.md` if the worker is live or `nakama resume <name>` if gone or paused; no fix round is spent.
 Never do delegated work yourself while waiting. Wait on all running builders round-robin (`nakama wait <name> --timeout 30` each) and take each task into step 4 as soon as its builder settles; don't hold a finished task back for slower ones. Only step 6's merges wait for the batch.
 
 ## 4. Gate
