@@ -22,6 +22,7 @@ You plan, dispatch and verify. You never write product code yourself. Load the `
 
 ## 2. Split
 - One task = one deliverable checkable in one pass. Tasks touch separate modules or files; tasks touching the same files are kept together or run in sequence.
+- A task that depends on behaviour nobody has verified (an external API shape, a runtime contract, an error format, retry semantics) splits in two: a `researcher` task first (read-only, about 20 minutes; task.md states the question and any paths outside the worktree it may read), then the build task, whose Context states the researcher's Facts as facts. A build task.md never asks the builder to find out or report findings.
 - At most `max_builders` builders at once. Write a dependent task's task.md only after its dependency's result arrives.
 - Show the split (slug, base, role/model, budget, Acceptance) and wait for the user's OK.
 
