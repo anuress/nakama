@@ -112,7 +112,7 @@ role's persona, with the user roles directory taking precedence. Frontmatter fie
 | `kind` | agent CLI to run: `pi` or `claude` |
 | `model` | model id for that CLI (optional) |
 | `mode` | `read` or `write` |
-| `tools` | optional; Pi read mode only; comma-separated extra entries are appended to the read tool allowlist (e.g. `mcp__<server>__*`) |
+| `tools` | optional; Pi read mode only; comma-separated extra entries are appended to the read tool allowlist (e.g. `mcp__<server>__*`); plain names patterns only (no +name/-name) |
 | `budget` | minutes before `nakama wait` reports `over_budget` |
 | `names` | optional name pool |
 | `spawns` | optional; lets the role launch its own agents (off by default, so a worker can't recursively spawn a crew) |

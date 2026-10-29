@@ -1712,6 +1712,17 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(rc, 0, out)
         self.assertNotIn("--tools", self.start_call())
 
+    def test_pi_read_role_rejects_tool_modifiers_before_start(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text(
+            "---\nkind: pi\nmode: read\ntools: +codemode\n---\nYou are a reviewer.\n")
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out["error"],
+                         "role reviewer: tools takes plain tool names patterns, not +name/-name entries")
+        self.assertFalse(any(call[1:3] == ["agent", "start"] for call in self.calls()))
+
     def test_kind_override_drops_the_roles_model(self):
         # A role's model names a model of its own kind; under another CLI it is meaningless.
         self.nakama("launch", "reviewer", "tip", "--no-worktree", "--kind", "pi")

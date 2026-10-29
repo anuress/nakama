@@ -15,7 +15,7 @@ prefix: r            # name prefix → r1-<slug>
 kind: claude         # pi | claude
 model: opus          # omit = the CLI's default
 mode: read           # read | write (tool limits and Claude permission flags)
-tools: mcp__<server>__* # optional; Pi read mode only; extra entries append to the read tool allowlist
+tools: mcp__<server>__* # optional; Pi read mode only; extra entries append to the read tool allowlist; plain names patterns only (no +name/-name)
 budget: 20           # minutes
 names: zoro, sanji   # optional pool: zoro-<slug>, sanji-<slug>, then zoro2-<slug>
 spawns: true         # optional: this role may run `nakama launch` itself (sub-orchestrator); off by default
