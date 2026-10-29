@@ -140,6 +140,7 @@ def load_role(role):
         "kind": meta.get("kind") or "pi",
         "model": meta.get("model") or None,
         "mode": meta.get("mode") or "read",
+        "tools": meta.get("tools", "").strip(),
         "budget": budget,
         "names": [unquote(n.strip()) for n in names.split(",") if n.strip()],
         "spawns": meta.get("spawns", "").lower() in ("true", "yes"),
@@ -395,7 +396,8 @@ def agent_args(rec, meta):
     if rec["kind"] == "pi":
         args = ["--approve", "--append-system-prompt", meta["body"] if PI_PERSONA_AS_TEXT else str(persona)]
         if rec["mode"] == "read":
-            args += ["--tools", PI_READ_TOOLS]
+            tools = ",".join(filter(None, [PI_READ_TOOLS, meta.get("tools", "")]))
+            args += ["--tools", tools]
     else:
         args = ["--append-system-prompt-file", str(persona), *CLAUDE_FLAGS[rec["mode"]]]
     if rec.get("model"):

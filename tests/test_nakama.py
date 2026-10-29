@@ -1682,6 +1682,36 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         rec = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
         self.assertEqual(rec["budget_min"], 5)
 
+    def test_pi_read_role_appends_frontmatter_tools_to_read_allowlist(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text(
+            "---\nkind: pi\nmode: read\ntools: \" mcp__x__*,codemode \"\n---\nYou are a reviewer.\n")
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.assertEqual(rc, 0, out)
+        start = self.start_call()
+        self.assertEqual(start[start.index("--tools") + 1],
+                         "read,bash,grep,find,ls,write,mcp__x__*,codemode")
+
+    def test_pi_read_role_without_tools_keeps_default_read_allowlist(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text(
+            "---\nkind: pi\nmode: read\n---\nYou are a reviewer.\n")
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.assertEqual(rc, 0, out)
+        start = self.start_call()
+        self.assertEqual(start[start.index("--tools") + 1], "read,bash,grep,find,ls,write")
+
+    def test_pi_write_role_ignores_frontmatter_tools(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text(
+            "---\nkind: pi\nmode: write\ntools: mcp__x__*\n---\nYou are a reviewer.\n")
+        rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("--tools", self.start_call())
+
     def test_kind_override_drops_the_roles_model(self):
         # A role's model names a model of its own kind; under another CLI it is meaningless.
         self.nakama("launch", "reviewer", "tip", "--no-worktree", "--kind", "pi")
