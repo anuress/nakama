@@ -260,22 +260,27 @@ def screen(name):
     return p.stdout if p.returncode == 0 else visible(name)
 
 
+def parse_result_status(text):
+    status_line = STATUS_LINE_RE.search(text)
+    status_value = status_line.group(1).strip() if status_line else None
+    status_match = STATUS_VALUE_RE.match(status_value or "")
+    return status_value, status_match.group(1) if status_match else None, status_line is not None
+
+
 def fresh_result(rec):
     result = agent_dir(rec) / "result.md"
     if not rec.get("prompted_at") or not result.is_file() or result.stat().st_mtime <= rec["prompted_at"]:
         return None, None, None
     text = result.read_text()
-    status_line = STATUS_LINE_RE.search(text)
-    status_value = status_line.group(1).strip() if status_line else None
-    status_match = STATUS_VALUE_RE.match(status_value or "")
+    status_value, status, has_status_line = parse_result_status(text)
     next_match = NEXT_RE.search(text)
     next_hop = next_match.group(1) if next_match and next_match.group(1) in NEXT_HOPS else None
     hint = None
-    if not status_match:
+    if status is None:
         allowed = ", ".join(STATUS_VALUES)
-        got = f" (got {json.dumps(status_value)})" if status_line else ""
+        got = f" (got {json.dumps(status_value)})" if has_status_line else ""
         hint = f"Status must be exactly one of {allowed}{got}"
-    return (status_match.group(1) if status_match else "malformed"), next_hop, hint
+    return (status or "malformed"), next_hop, hint
 
 
 def task_steps(rec):
@@ -815,13 +820,14 @@ def cmd_pause(a):
 
     had_recipients = bool(pending)
     deadline = time.time() + a.timeout
-    noted = set()
+    noted = {}
     while pending:
         for rec, sent_at in pending:
             result = agent_dir(rec) / "result.md"
             if (result.is_file() and result.stat().st_mtime > sent_at
                     and agent_status(rec["name"]) in ("idle", "done", None)):
-                noted.add(rec["name"])
+                _, result_status, _ = parse_result_status(result.read_text())
+                noted[rec["name"]] = result_status
         pending = [(rec, sent_at) for rec, sent_at in pending if rec["name"] not in noted]
         remaining = deadline - time.time()
         if not pending or remaining <= 0:
@@ -832,12 +838,23 @@ def cmd_pause(a):
         if rec["name"] in results:
             continue
         was_noted = rec["name"] in noted
+        result_status = noted.get(rec["name"])
+        dirty = worktree_dirty(rec)
+        if result_status and result_status != "partial" and not dirty:
+            close_worker_surface(rec)
+            rec.update(closed=True, paused=False, paused_forced=False)
+            save(rec)
+            results[rec["name"]] = {
+                "name": rec["name"], "status": "finished", "result_status": result_status,
+                "steps": steps_info(rec), "dirty": dirty,
+            }
+            continue
         close_worker_surface(rec)
         rec.update(closed=True, paused=True, paused_forced=not was_noted)
         save(rec)
         results[rec["name"]] = {
             "name": rec["name"], "status": "paused" if was_noted else "paused_forced",
-            "steps": steps_info(rec), "dirty": worktree_dirty(rec),
+            "steps": steps_info(rec), "dirty": dirty,
         }
     ordered = [results[rec["name"]] for rec in selected]
     if a.all:

@@ -1236,6 +1236,76 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertIn("Do not commit", pause_message)
         self.assertIn("Next: retry", pause_message)
 
+    def test_pause_reports_finished_for_clean_non_partial_note(self):
+        out = self.launch()
+        worktree = out["worktree"]
+        self.wgit(worktree, "init", "-q", "-b", "main")
+        Path(worktree, "tracked.txt").write_text("clean")
+        self.wgit(worktree, "add", "tracked.txt")
+        self.wgit(worktree, "commit", "-q", "-m", "baseline")
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: succeeded"})
+        rc, result = self.nakama("pause", out["name"], "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result, {
+            "name": out["name"], "status": "finished", "result_status": "succeeded",
+            "steps": None, "dirty": False})
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"])
+        self.assertFalse(rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+        self.assertEqual(self.nakama("sweep")[1]["paused_workers"], [])
+        rc, teardown = self.nakama("teardown", out["name"], "--remove-worktree")
+        self.assertEqual(rc, 0, teardown)
+        self.assertEqual(teardown["status"], "closed")
+        self.assertTrue(teardown["worktree_removed"])
+
+    def test_pause_keeps_non_partial_note_paused_when_worktree_dirty(self):
+        out = self.launch()
+        worktree = out["worktree"]
+        self.wgit(worktree, "init", "-q", "-b", "main")
+        Path(worktree, "tracked.txt").write_text("clean")
+        self.wgit(worktree, "add", "tracked.txt")
+        self.wgit(worktree, "commit", "-q", "-m", "baseline")
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        Path(worktree, "tracked.txt").write_text("uncommitted")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: succeeded"})
+        rc, result = self.nakama("pause", out["name"], "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused")
+        self.assertTrue(result["dirty"])
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+
+    def test_pause_keeps_note_without_valid_status_paused(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "No valid Status line"})
+        rc, result = self.nakama("pause", out["name"], "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused")
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+
+    def test_pause_all_keeps_paused_summary_when_worker_finishes(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: succeeded"})
+        rc, result = self.nakama("pause", "--all", "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(result["results"][0]["status"], "finished")
+
     def test_pause_forced_when_no_note_before_timeout(self):
         out = self.launch()
         self.task(out)
