@@ -133,7 +133,7 @@ def load_role(role):
         emit({"error": f"role {role}: budget must be a whole number of minutes"}, 2)
     tools = meta.get("tools", "").strip()
     if any(entry.strip().startswith(("+", "-")) for entry in tools.split(",")):
-        emit({"error": f"role {role}: tools takes plain tool names or patterns, not +name/-name entries"}, 2)
+        emit({"error": f"role {role}: tools takes plain tool names patterns, not +name/-name entries"}, 2)
     names = meta.get("names", "").strip()
     if names.startswith("[") and names.endswith("]"):
         names = names[1:-1]
