@@ -1678,9 +1678,18 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         start = self.start_call()
         self.assertEqual(start[start.index("--kind") + 1], "pi")
         self.assertEqual(start[start.index("--model") + 1], "x/y")
-        self.assertIn("--tools", start)
+        tools_index = start.index("--tools")
+        self.assertEqual(start[tools_index:tools_index + 4],
+                         ["--tools", "+grep,+find,+ls", "--exclude-tools", "edit"])
         rec = json.loads((self.root / "records" / f"{out['name']}.json").read_text())
         self.assertEqual(rec["budget_min"], 5)
+
+    def test_pi_write_mode_uses_default_tools_without_flags(self):
+        rc, out = self.nakama("launch", "builder", "tip", "--no-worktree")
+        self.assertEqual(rc, 0, out)
+        start = self.start_call()
+        self.assertNotIn("--tools", start)
+        self.assertNotIn("--exclude-tools", start)
 
     def test_kind_override_drops_the_roles_model(self):
         # A role's model names a model of its own kind; under another CLI it is meaningless.

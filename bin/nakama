@@ -47,7 +47,7 @@ NEXT_HOPS = {"review", "merge", "none", "retry", "ask"}
 # Verified against live wt and pi/Claude CLIs.
 WT_PATH_KEY = "path"
 PI_PERSONA_AS_TEXT = False
-PI_READ_TOOLS = "read,bash,grep,find,ls,write"
+PI_READ_ARGS = ["--tools", "+grep,+find,+ls", "--exclude-tools", "edit"]
 # Always pass an explicit --permission-mode: a user default of auto mode overrides the allow list.
 # Project-specific commands (build tools) belong in that repo's .claude/settings.local.json.
 CLAUDE_FLAGS = {
@@ -395,7 +395,7 @@ def agent_args(rec, meta):
     if rec["kind"] == "pi":
         args = ["--approve", "--append-system-prompt", meta["body"] if PI_PERSONA_AS_TEXT else str(persona)]
         if rec["mode"] == "read":
-            args += ["--tools", PI_READ_TOOLS]
+            args += PI_READ_ARGS
     else:
         args = ["--append-system-prompt-file", str(persona), *CLAUDE_FLAGS[rec["mode"]]]
     if rec.get("model"):

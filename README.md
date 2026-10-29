@@ -130,9 +130,10 @@ clears its environment can get around it.
 
 Read-only roles are enforced only for Claude workers (permission mode
 `default` with a read allow list). For pi workers they are an instruction
-contract, because pi's read tool list still includes `bash` and `write`. The
-orchestrator checks afterwards that `git status`, `HEAD` and `git stash list`
-are unchanged.
+contract: read mode uses pi's defaults with `edit` excluded, plus `grep`,
+`find`, and `ls`; `bash` and `write` remain available, and extension and MCP
+tools are kept. The orchestrator checks afterwards that `git status`, `HEAD`
+and `git stash list` are unchanged.
 
 ## Development
 
