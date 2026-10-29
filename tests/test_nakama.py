@@ -1720,7 +1720,7 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         rc, out = self.nakama("launch", "reviewer", "tip", "--no-worktree")
         self.assertEqual(rc, 2)
         self.assertEqual(out["error"],
-                         "role reviewer: tools takes plain tool names patterns, not +name/-name entries")
+                         "role reviewer: tools takes plain tool names or patterns, not +name/-name entries")
         self.assertFalse(any(call[1:3] == ["agent", "start"] for call in self.calls()))
 
     def test_kind_override_drops_the_roles_model(self):
