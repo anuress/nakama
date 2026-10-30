@@ -2007,9 +2007,8 @@ Broken role.
         rows = [l for l in text.splitlines() if l.startswith("| `nakama")]
         wait = next(l for l in rows if l.startswith("| `nakama wait"))
         extend = next(l for l in rows if l.startswith("| `nakama extend"))
-        self.assertIn("Bash tool", wait)
-        self.assertIn("300000 ms", wait)
-        self.assertIn("--timeout 100", wait)
+        self.assertIn("in the background", wait)
+        self.assertIn("--timeout 1800", wait)
         self.assertIn("180-minute ceiling applies per prompt", extend)
         self.assertIn("--answer", extend)
 
