@@ -1,8 +1,8 @@
 class Nakama < Formula
   desc "Run a crew of coding agents in herdr panes, one git worktree each"
   homepage "https://github.com/anuress/nakama"
-  url "https://github.com/anuress/nakama/archive/refs/tags/v0.1.7.tar.gz"
-  sha256 "22500d2f23650142e2a001a22e0fe203b80722a034adf367504fb3832204a94e"
+  url "https://github.com/anuress/nakama/archive/refs/tags/v0.1.8.tar.gz"
+  sha256 "b22645701ed7d1df496ad5574d166e90df09ba5f8e81b19c589d57a3d59ab2dc"
   license "MIT"
   head "https://github.com/anuress/nakama.git", branch: "master"
 
