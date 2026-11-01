@@ -103,7 +103,10 @@ For tasks too large for one session but touching the same files, define ordered 
 
 A role is a markdown file: frontmatter plus a persona. Bundled ones live in
 `roles/`; add or override yours in `~/.config/nakama/roles/`. `nakama roles`
-lists them all. An optional `_common.md` in either roles directory is prepended to every
+lists them all. A user role with frontmatter only (nothing after the closing `---`)
+overrides just those fields and keeps the bundled persona, so upgrades still reach it;
+for example a `reviewer.md` holding only `kind: pi` and `model: litellm/z-ai/glm-5.3:max`.
+An optional `_common.md` in either roles directory is prepended to every
 role's persona, with the user roles directory taking precedence. Frontmatter fields:
 
 | field | meaning |

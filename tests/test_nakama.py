@@ -1845,6 +1845,18 @@ Broken role.
         self.assertEqual(roles["tester"]["mode"], "write")
         self.assertEqual(roles["builder"]["path"], str(self.root / "roles" / "builder.md"))
 
+    def test_frontmatter_only_user_role_keeps_bundled_persona(self):
+        user = self.root / "userroles"
+        user.mkdir()
+        (user / "reviewer.md").write_text("---\nkind: pi\nmodel: glm\n---\n")
+        (user / "builder.md").write_text("---\nmodel: luna\n---\n")
+        reviewer = {r["role"]: r for r in self.nakama("roles")[1]["roles"]}["reviewer"]
+        self.assertEqual((reviewer["kind"], reviewer["model"]), ("pi", "glm"))
+        self.assertEqual((reviewer["prefix"], reviewer["names"]), ("r", ["zoro", "sanji"]))
+        self.assertEqual(reviewer["path"], str(user / "reviewer.md"))
+        out = self.launch()
+        self.assertEqual(Path(out["dir"], "persona.md").read_text(), "You are a builder.\n")
+
     def test_common_persona_precedes_role_persona(self):
         (self.root / "roles" / "_common.md").write_text("Shared policy overrides local text.\n")
         out = self.launch()

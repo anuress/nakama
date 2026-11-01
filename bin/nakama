@@ -109,9 +109,6 @@ def load_role(role):
                  if not role.startswith("_") and (d / f"{role}.md").is_file()), None)
     if path is None:
         emit({"error": f"unknown role {role}: no {role}.md in {USER_ROLES_DIR} or {BUNDLED_ROLES_DIR}"}, 2)
-    text = path.read_text()
-    meta, body = {}, text
-
     def unquote(value):
         return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
 
@@ -121,12 +118,22 @@ def load_role(role):
             return value[1:end]
         return value.split("#")[0].strip()
 
-    if text.startswith("---\n"):
-        head, _, body = text[4:].partition("\n---\n")
-        for line in head.splitlines():
-            key, sep, value = line.partition(":")
-            if sep:
-                meta[key.strip()] = scalar(value)
+    def parse(text):
+        meta, body = {}, text
+        if text.startswith("---\n"):
+            head, _, body = text[4:].partition("\n---\n")
+            for line in head.splitlines():
+                key, sep, value = line.partition(":")
+                if sep:
+                    meta[key.strip()] = scalar(value)
+        return meta, body
+
+    meta, body = parse(path.read_text())
+    bundled = BUNDLED_ROLES_DIR / f"{role}.md"
+    # A user role with frontmatter only overrides those fields and keeps the bundled persona.
+    if not body.strip() and path != bundled and bundled.is_file():
+        base_meta, body = parse(bundled.read_text())
+        meta = {**base_meta, **meta}
     try:
         budget = int(meta.get("budget") or 20)
     except ValueError:
