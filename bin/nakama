@@ -551,21 +551,12 @@ def cmd_resume(a):
     pause_file = agent_dir(rec) / "pause.md"
     pause_retired = pause_file.exists()
     if pause_retired:
-        timestamp = int(time.time())
-        while True:
-            archived = pause_file.with_name(f"pause-{timestamp}.done.md")
-            try:
-                # Create the archive without replacing an existing pause note.
-                os.link(pause_file, archived)
-            except FileExistsError:
-                timestamp += 1
-            except FileNotFoundError:
-                if not pause_file.parent.is_dir():
-                    raise
-                break  # Another concurrent resume already retired pause.md.
-            else:
-                pause_file.unlink(missing_ok=True)
-                break
+        pause_file.rename(pause_file.with_name(f"pause-{int(time.time())}.done.md"))
+    if pause_retired or was_paused:
+        for mail in unread(rec["name"]):
+            _, sender, kind, _ = mail.name.split(".")
+            if sender == ORCH and kind == "info" and mail.read_text().startswith("Pause now."):
+                mail.rename(mail.with_suffix(".read"))
 
     message = ("You are being resumed after a restart. Re-read "
                f".agent/{rec['name']}/task.md and every fix-*.md next to it, check `git log` and `git status` "

@@ -582,24 +582,29 @@ class NakamaTest(unittest.TestCase):
         prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
         self.assertIn("The earlier pause is over", prompts[-1][-1])
 
-    def test_resume_does_not_overwrite_retired_pause_file(self):
+    def test_resume_marks_pause_mail_read(self):
         out = self.launch()
         self.task(out)
         self.set_state(status="working")
-        self.nakama("pause", out["name"], "--timeout", "0")
-        pause_file = Path(out["dir"], "pause.md")
-        pause_contents = pause_file.read_text()
-        self.nakama("teardown", out["name"])
+        rc, paused = self.nakama("pause", out["name"], "--timeout", "0")
+        self.assertEqual((rc, paused["status"]), (0, "paused_forced"))
+        inbox = Path(out["dir"], "inbox")
+        pause_mail = next(mail for mail in inbox.glob("*.md") if mail.read_text().startswith("Pause now."))
 
-        archived = Path(out["dir"], "pause-1700000000.done.md")
-        archived.write_text("keep")
-        clock = self.root / "frozen-clock"
-        clock.mkdir()
-        (clock / "sitecustomize.py").write_text("import time\ntime.time = lambda: 1700000000\n")
-        rc, resumed = self.nakama("resume", out["name"], env={**self.env, "PYTHONPATH": str(clock)})
+        self.set_state(status=None)
+        rc, unrelated = self.nakama("send", out["name"], "info", self.msg("Unrelated notification"))
+        self.assertEqual((rc, unrelated["status"]), (0, "sent"))
+        unrelated_mail = Path(unrelated["file"])
+
+        rc, resumed = self.nakama("resume", out["name"])
         self.assertEqual((rc, resumed["status"]), (0, "fresh_primed"))
-        self.assertEqual(archived.read_text(), "keep")
-        self.assertEqual(Path(out["dir"], "pause-1700000001.done.md").read_text(), pause_contents)
+        read_pause_mail = pause_mail.with_suffix(".read")
+        self.assertFalse(pause_mail.exists())
+        self.assertTrue(read_pause_mail.is_file())
+        self.assertTrue(read_pause_mail.read_text().startswith("Pause now."))
+        self.assertTrue(unrelated_mail.is_file())
+        self.assertFalse(unrelated_mail.with_suffix(".read").exists())
+        self.assertFalse(any(mail.read_text().startswith("Pause now.") for mail in inbox.glob("*.md")))
 
     def test_resume_without_pause_has_no_pause_note(self):
         out = self.launch()
