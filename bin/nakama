@@ -830,9 +830,16 @@ def cmd_pause(a):
     results = {}
     pending = []
     unreachable = []
+    stopped = False
     for rec in selected:
         if rec["mode"] == "read":
-            results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "read_only"}
+            # A read worker holds no uncommitted work: --all stops it instead of pausing it.
+            run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
+            close_worker_surface(rec)
+            rec.update(closed=True)
+            save(rec)
+            stopped = True
+            results[rec["name"]] = {"name": rec["name"], "status": "stopped", "reason": "read_only"}
             continue
         if not agent_dir(rec).is_dir():
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "no_worktree"}
@@ -861,7 +868,7 @@ def cmd_pause(a):
             # No live agent will read the note: waiting on it would only burn the timeout.
             unreachable.append((rec, sent_at))
 
-    had_recipients = bool(pending or unreachable)
+    had_recipients = bool(pending or unreachable or stopped)
     deadline = time.time() + a.timeout
     noted = {}
     while pending:

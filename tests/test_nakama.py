@@ -1477,7 +1477,7 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(self.calls()[len(before):], [])
         self.assertFalse(Path(out["dir"]).exists())
 
-    def test_pause_all_skips_read_only_and_settled_and_other_sessions(self):
+    def test_pause_all_stops_read_only_and_skips_settled_and_other_sessions(self):
         builder_a, builder_b = self.launch(), self.launch()
         self.task(builder_a)
         self.task(builder_b)
@@ -1498,10 +1498,27 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(entries[builder_b["name"]], {
             "name": builder_b["name"], "status": "skipped", "reason": "settled"})
         self.assertEqual(entries[reviewer["name"]], {
-            "name": reviewer["name"], "status": "skipped", "reason": "read_only"})
+            "name": reviewer["name"], "status": "stopped", "reason": "read_only"})
+        reviewer_rec = self.record(reviewer["name"])
+        self.assertTrue(reviewer_rec["closed"])
+        self.assertFalse(reviewer_rec.get("paused", False))
+        self.assertIn(["herdr", "agent", "send-keys", reviewer["name"], "ctrl+c", "ctrl+c"], self.calls())
+        self.assertIn(["herdr", "tab", "close", reviewer_rec["tab"]], self.calls())
         self.assertFalse(self.record(builder_b["name"])["closed"])
         self.assertFalse(self.record(builder_b["name"]).get("paused", False))
         self.assertNotIn(builder_c["name"], entries)
+
+    def test_pause_all_stops_lone_read_only_worker(self):
+        reviewer = self.nakama("launch", "reviewer", "review", "--no-worktree")[1]
+        self.set_state(status="working")
+        rc, result = self.nakama("pause", "--all", "--timeout", "30")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result, {
+            "status": "paused",
+            "results": [{"name": reviewer["name"], "status": "stopped", "reason": "read_only"}]})
+        rec = self.record(reviewer["name"])
+        self.assertTrue(rec["closed"])
+        self.assertFalse(rec.get("paused", False))
 
     def test_pause_all_uses_one_shared_deadline(self):
         workers = [self.launch() for _ in range(3)]
