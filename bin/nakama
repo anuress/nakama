@@ -391,9 +391,16 @@ def git_state(rec):
     return {"head": head, "stash": "\n".join(own_stashes), "tree": tree}
 
 
+def spent_minutes(rec):
+    """Minutes spent on the current prompt, including the stretches before an earlier pause."""
+    spent = rec.get("spent_min", 0)
+    if rec.get("prompted_at"):
+        spent += (time.time() - rec["prompted_at"]) / 60
+    return spent
+
+
 def over_budget(rec):
-    elapsed_min = (time.time() - rec["prompted_at"]) / 60
-    return elapsed_min > rec["budget_min"] + rec["extended_min"]
+    return spent_minutes(rec) > rec["budget_min"] + rec["extended_min"]
 
 
 def agent_args(rec, meta):
@@ -552,7 +559,7 @@ def cmd_resume(a):
         if not rec.get("closed"):
             close_worker_surface(rec)
         rec.update(closed=False, paused=False, paused_forced=False, pause_sent_at=None,
-                   prompted_at=None, nudged_at=None, extended_min=0,
+                   prompted_at=None, nudged_at=None,
                    screen_sig=None, screen_changed_at=None)
         started = start_worker(rec, meta, layout, rec.get("direction", "right"))
         if started.returncode != 0:
@@ -584,7 +591,7 @@ def cmd_resume(a):
     prompted = run(["herdr", "agent", "prompt", rec["name"], message], check=False)
     if prompted.returncode != 0:
         emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
-    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
+    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
                paused=False, paused_forced=False, pause_sent_at=None,
                screen_sig=None, screen_changed_at=None)
     save(rec)
@@ -612,7 +619,8 @@ def cmd_prompt(a):
         message += progress_note(rec, dirty=False)
     run(["herdr", "agent", "prompt", rec["name"], message])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
-    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None, extended_min=0,
+    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
+               extended_min=0, spent_min=0,
                screen_sig=None, screen_changed_at=None)
     save(rec)
     emit({"name": rec["name"], "status": "prompted", "file": str(rel), "rounds": rec["rounds"]})
@@ -903,7 +911,9 @@ def cmd_pause(a):
             close_worker_surface(rec)
         else:
             stop_worker(rec)
-        rec.update(closed=True, paused=True, paused_forced=not was_noted)
+        # Resume re-arms prompted_at, so the time already spent is banked here or it is lost.
+        rec.update(closed=True, paused=True, paused_forced=not was_noted,
+                   spent_min=spent_minutes(rec))
         save(rec)
         results[rec["name"]] = {
             "name": rec["name"], "status": "paused" if was_noted else "paused_forced",

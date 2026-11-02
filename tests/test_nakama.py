@@ -552,7 +552,7 @@ class NakamaTest(unittest.TestCase):
         rec = json.loads(record.read_text())
         self.assertFalse(rec["closed"])
         self.assertEqual((rec["rounds"], rec["budget_min"]), (1, 73))
-        self.assertEqual(rec["extended_min"], 0)
+        self.assertEqual(rec["extended_min"], 15)  # resume keeps the extensions it was granted
         self.assertIsNotNone(rec["prompted_at"])
         self.assertIsNone(rec["nudged_at"])
         self.assertIsNone(rec["screen_sig"])
@@ -1141,6 +1141,48 @@ class NakamaTest(unittest.TestCase):
         out = self.launch()
         self.assertEqual(self.nakama("extend", out["name"], "120")[1]["status"], "extended")
         self.assertEqual(self.nakama("extend", out["name"], "60")[1]["status"], "refused")
+
+    def test_over_budget_counts_banked_spent_min(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["spent_min"] = 46  # over the role's 45-minute budget on its own
+        record.write_text(json.dumps(rec))
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "5")[1]["status"], "over_budget")
+
+    def test_pause_banks_spent_min_and_resume_keeps_budget(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.nakama("extend", out["name"], "15")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["prompted_at"] -= 10 * 60
+        record.write_text(json.dumps(rec))
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"],
+                         "paused_forced")
+        self.assertGreaterEqual(self.record(out["name"])["spent_min"], 9.9)
+        self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
+        rec = self.record(out["name"])
+        self.assertEqual(rec["extended_min"], 15)
+        self.assertGreaterEqual(rec["spent_min"], 9.9)
+
+    def test_prompt_resets_spent_min(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        record = self.root / "records" / f"{out['name']}.json"
+        rec = json.loads(record.read_text())
+        rec.update(spent_min=12, extended_min=5)
+        record.write_text(json.dumps(rec))
+        self.task(out, "fix-1.md")
+        self.assertEqual(self.nakama("prompt", out["name"], "fix-1.md")[1]["status"], "prompted")
+        rec = self.record(out["name"])
+        self.assertEqual((rec["spent_min"], rec["extended_min"]), (0, 0))
 
     def test_agent_gone_is_failed(self):
         out = self.launch()
