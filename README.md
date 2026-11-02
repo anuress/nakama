@@ -97,7 +97,7 @@ nakama wait b1-fix-login             # repeat while it says running
 nakama teardown b1-fix-login
 ```
 
-For tasks too large for one session but touching the same files, define ordered `## Steps` in `task.md` and commit each checked step with a `Nakama-Step: <k>/<N>` trailer. To pause, `nakama pause <name>|--all` asks builders to leave changes uncommitted and write `## Resume`, then closes their tabs; `nakama resume <name>` continues from the retained worktree.
+For tasks too large for one session but touching the same files, define ordered `## Steps` in `task.md` and commit each checked step with a `Nakama-Step: <k>/<N>` trailer. To pause, `nakama pause <name>|--all` asks builders to leave changes uncommitted and write `## Resume`, then closes their tabs (`--all` also stops the read-only reviewers in that session); `nakama resume <name>` continues from the retained worktree and keeps the budget already spent.
 
 ## Roles
 
