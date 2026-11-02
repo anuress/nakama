@@ -2350,6 +2350,88 @@ Broken role.
         self.assertIn("180-minute ceiling applies per prompt", extend)
         self.assertIn("--answer", extend)
 
+    def start_session(self, name="cart-rework", about="shopee cart group lazy-row fix", env=None):
+        return self.nakama("session", "start", name, "--about", about, env=env)
+
+    def orch_mail(self, session, text="hello"):
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / session
+        box.mkdir(parents=True, exist_ok=True)
+        (box / f"{time.time_ns()}.b1-x.info.md").write_text(text)
+
+    def test_session_start_creates_bound_meta_and_export(self):
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["name"], "cart-rework")
+        self.assertEqual(out["about"], "shopee cart group lazy-row fix")
+        self.assertEqual(out["export"], "export NAKAMA_SESSION=cart-rework")
+        path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework" / "meta.json"
+        self.assertEqual(out["dir"], str(path.parent))
+        meta = json.loads(path.read_text())
+        self.assertEqual(sorted(meta),
+                         ["about", "adoptions", "agent", "created", "last_seen", "name", "owner_pane"])
+        self.assertEqual((meta["name"], meta["about"]), ("cart-rework", "shopee cart group lazy-row fix"))
+        self.assertEqual(meta["owner_pane"], self.env["HERDR_PANE_ID"])
+        self.assertEqual((meta["adoptions"], meta["agent"]), ([], None))
+        self.assertAlmostEqual(meta["created"], meta["last_seen"])
+        self.assertAlmostEqual(meta["created"], time.time(), delta=60)
+
+    def test_session_start_rejects_name_needing_sanitizing(self):
+        rc, err = self.start_session("pr-6506/review")
+        self.assertEqual(rc, 2)
+        self.assertIn("pr-6506_review", err["error"])
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions").exists())
+
+    def test_session_start_rejects_missing_or_multiline_about(self):
+        self.assertEqual(self.nakama("session", "start", "cart-rework")[0], 2)
+        self.assertEqual(self.start_session(about="")[0], 2)
+        self.assertEqual(self.start_session(about="one\ntwo")[0], 2)
+        self.assertEqual(self.start_session(about="x" * 201)[0], 2)
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions").exists())
+
+    def test_session_start_rejects_duplicate_name(self):
+        self.assertEqual(self.start_session()[0], 0)
+        rc, err = self.start_session(about="another about")
+        self.assertEqual(rc, 2)
+        self.assertEqual(err["about"], "shopee cart group lazy-row fix")
+        self.assertEqual(err["pane"], self.env["HERDR_PANE_ID"])
+        self.assertTrue(err["pane_alive"])
+        self.set_state(statuses={self.env["HERDR_PANE_ID"]: None})
+        self.assertFalse(self.start_session()[1]["pane_alive"])
+
+    def test_session_start_needs_a_herdr_pane(self):
+        env = {k: v for k, v in self.env.items() if k != "HERDR_PANE_ID"}
+        rc, err = self.start_session(env=env)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("HERDR_PANE_ID", err["error"])
+
+    def test_session_resolution_uses_pane_bound_session(self):
+        self.assertEqual(self.start_session()[0], 0)
+        self.orch_mail("cart-rework", "bound")
+        self.orch_mail("w3_p1", "pane")
+        self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]], ["bound"])
+
+    def test_session_resolution_falls_back_to_pane_id(self):
+        self.orch_mail("w3_p1", "pane")
+        self.orch_mail("cart-rework", "other")
+        self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]], ["pane"])
+
+    def test_session_resolution_lists_legacy_raw_pane_record(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        state.mkdir(parents=True, exist_ok=True)
+        for name, session in (("b1-legacy", "w3:p1"), ("b1-other", "w9:p9")):
+            (state / f"{name}.json").write_text(json.dumps({
+                "name": name, "role": "builder", "kind": "pi", "worktree": str(self.root),
+                "rounds": 0, "closed": False, "session": session}))
+        self.assertEqual([r["name"] for r in self.nakama("list")[1]["agents"]], ["b1-legacy"])
+
+    def test_session_resolution_prefers_env_over_pane_binding(self):
+        self.assertEqual(self.start_session()[0], 0)
+        self.orch_mail("cart-rework", "bound")
+        self.orch_mail("chosen", "env")
+        env = {**self.env, "NAKAMA_SESSION": "chosen"}
+        self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek", env=env)[1]["messages"]],
+                         ["env"])
+
 
 if __name__ == "__main__":
     unittest.main()
