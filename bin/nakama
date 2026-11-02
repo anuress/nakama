@@ -822,6 +822,10 @@ def cmd_pause(a):
         if not agent_dir(rec).is_dir():
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "no_worktree"}
             continue
+        if not rec.get("prompted_at"):
+            # A worker that never got a task has nothing worth a Resume note.
+            results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "not_prompted"}
+            continue
         state = agent_status(rec["name"])
         if state in ("idle", "done", None) and fresh_result(rec)[0] is not None:
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "settled"}
@@ -860,7 +864,7 @@ def cmd_pause(a):
         was_noted = rec["name"] in noted
         result_status = noted.get(rec["name"])
         dirty = worktree_dirty(rec)
-        if result_status and result_status != "partial" and not dirty:
+        if result_status and result_status not in ("partial", "needs_input") and not dirty:
             close_worker_surface(rec)
             rec.update(closed=True, paused=False, paused_forced=False)
             save(rec)

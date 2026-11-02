@@ -567,6 +567,7 @@ class NakamaTest(unittest.TestCase):
     def test_resume_retires_pause_file(self):
         out = self.launch()
         self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         rc, paused = self.nakama("pause", out["name"], "--timeout", "0")
         self.assertEqual(rc, 0, paused)
@@ -585,6 +586,7 @@ class NakamaTest(unittest.TestCase):
     def test_resume_marks_pause_mail_read(self):
         out = self.launch()
         self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         rc, paused = self.nakama("pause", out["name"], "--timeout", "0")
         self.assertEqual((rc, paused["status"]), (0, "paused_forced"))
@@ -1389,6 +1391,7 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
     def test_pause_forced_when_no_note_before_timeout(self):
         out = self.launch()
         self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         rc, result = self.nakama("pause", out["name"], "--timeout", "0")
         self.assertEqual(rc, 0, result)
@@ -1422,6 +1425,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_pause_all_skips_missing_worktree_without_aborting_others(self):
         live, missing = self.launch(), self.launch()
+        self.task(live)
+        self.nakama("prompt", live["name"], "task.md")
         shutil.rmtree(missing["worktree"])
         missing_record = self.root / "records" / f"{missing['name']}.json"
         before = missing_record.read_text()
@@ -1446,6 +1451,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_pause_all_skips_missing_agent_dir_without_aborting_others(self):
         live, missing = self.launch(), self.launch()
+        self.task(live)
+        self.nakama("prompt", live["name"], "task.md")
         shutil.rmtree(missing["dir"])
         missing_record = self.root / "records" / f"{missing['name']}.json"
         before = missing_record.read_text()
@@ -1477,6 +1484,7 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         reviewer = self.nakama("launch", "reviewer", "review", "--no-worktree")[1]
         env_other = {**self.env, "HERDR_PANE_ID": "other-session"}
         builder_c = self.nakama("launch", "builder", "other", env=env_other)[1]
+        self.nakama("prompt", builder_a["name"], "task.md")
         self.set_state(status="idle", write_on_prompt={
             "path": self.result(builder_b), "text": "Status: succeeded\nNext: review\n"})
         self.nakama("prompt", builder_b["name"], "task.md")
@@ -1497,6 +1505,9 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_pause_all_uses_one_shared_deadline(self):
         workers = [self.launch() for _ in range(3)]
+        for worker in workers:
+            self.task(worker)
+            self.nakama("prompt", worker["name"], "task.md")
         self.set_state(status=None, statuses={worker["name"]: "working" for worker in workers})
         started = time.monotonic()
         rc, result = self.nakama("pause", "--all", "--timeout", "1")
@@ -1508,6 +1519,7 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
     def test_resume_after_pause_clears_paused_flags(self):
         out = self.launch()
         self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"], "paused_forced")
         self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
@@ -1529,6 +1541,35 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(self.nakama("pause", "--all", "--timeout", "0")[1],
                          {"status": "no_recipients", "results": []})
 
+    def test_pause_skips_never_prompted_worker_by_name_and_in_all(self):
+        out = self.launch()
+        rc, result = self.nakama("pause", out["name"])
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result, {"name": out["name"], "status": "skipped", "reason": "not_prompted"})
+        self.assertFalse(Path(out["dir"], "pause.md").exists())
+        rc, result = self.nakama("pause", "--all", "--timeout", "30")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "no_recipients")
+        self.assertEqual(result["results"], [{"name": out["name"], "status": "skipped",
+                                              "reason": "not_prompted"}])
+        rec = self.record(out["name"])
+        self.assertFalse(rec["closed"] or rec.get("paused", False))
+        self.assertFalse(Path(out["dir"], "pause.md").exists())
+        self.assertFalse(any(c[1:3] in (["tab", "close"], ["pane", "close"]) for c in self.calls()))
+
+    def test_pause_needs_input_note_on_clean_tree_parks_worker(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: needs_input\nNext: ask\n"})
+        rc, result = self.nakama("pause", out["name"], "--timeout", "5")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused")
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"])
+        self.assertFalse(rec["paused_forced"])
+
     def test_pause_help_describes_its_effect(self):
         text = self.help_text("pause")
         for phrase in ("--all", "Resume note", "uncommitted", "keeps the worktree"):
@@ -1536,6 +1577,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_teardown_remove_worktree_refuses_paused_worker(self):
         out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.nakama("pause", out["name"], "--timeout", "0")
         before = self.calls()
@@ -1546,6 +1589,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_teardown_force_removes_paused_worktree(self):
         out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.nakama("pause", out["name"], "--timeout", "0")
         rc, result = self.nakama("teardown", out["name"], "--remove-worktree", "--force")
@@ -1560,6 +1605,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_teardown_without_removal_allows_paused_worker(self):
         out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.nakama("pause", out["name"], "--timeout", "0")
         rc, result = self.nakama("teardown", out["name"])
@@ -1569,6 +1616,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_sweep_lists_paused_workers(self):
         out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.nakama("pause", out["name"], "--timeout", "0")
         result = self.nakama("sweep")[1]
@@ -1576,6 +1625,8 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
 
     def test_sweep_omits_paused_workers_with_missing_worktree(self):
         out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
         self.set_state(status="working")
         self.nakama("pause", out["name"], "--timeout", "0")
         shutil.rmtree(out["worktree"])
@@ -1587,6 +1638,10 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         other = {**self.env, "NAKAMA_SESSION": "session-other", "HERDR_PANE_ID": "other-session"}
         first = self.nakama("launch", "builder", "first", env=current)[1]
         second = self.nakama("launch", "builder", "second", env=other)[1]
+        self.task(first)
+        self.nakama("prompt", first["name"], "task.md", env=current)
+        self.task(second)
+        self.nakama("prompt", second["name"], "task.md", env=other)
         self.set_state(status=None, statuses={first["name"]: "working", second["name"]: "working"})
         self.nakama("pause", first["name"], "--timeout", "0", env=current)
         self.nakama("pause", second["name"], "--timeout", "0", env=other)
