@@ -97,6 +97,7 @@ class NakamaTest(unittest.TestCase):
         self.set_state(status="idle")
         self.env = os.environ.copy()
         self.env.pop("NAKAMA_AGENT", None)
+        self.env.pop("NAKAMA_SESSION", None)  # a leaked export would make the session tests vacuous
         self.env.update({
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "HERDR_ENV": "1",
@@ -2358,6 +2359,13 @@ Broken role.
         box.mkdir(parents=True, exist_ok=True)
         (box / f"{time.time_ns()}.b1-x.info.md").write_text(text)
 
+    def pane_record(self, name, session, pane):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        state.mkdir(parents=True, exist_ok=True)
+        (state / f"{name}.json").write_text(json.dumps({
+            "name": name, "role": "builder", "kind": "pi", "worktree": str(self.root),
+            "rounds": 0, "closed": False, "session": session, "orch_pane": pane}))
+
     def test_session_start_creates_bound_meta_and_export(self):
         rc, out = self.start_session()
         self.assertEqual(rc, 0, out)
@@ -2404,6 +2412,57 @@ Broken role.
         self.assertEqual(rc, 2, err)
         self.assertIn("HERDR_PANE_ID", err["error"])
 
+    def test_session_start_rejects_case_insensitive_duplicate(self):
+        self.assertEqual(self.start_session("cart", "first")[0], 0)
+        path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart" / "meta.json"
+        before = path.read_bytes()
+        rc, err = self.start_session("Cart", "SECOND")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["about"], "first")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_session_start_rejects_unreadable_existing_meta(self):
+        ghost = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "ghost"
+        ghost.mkdir(parents=True)
+        (ghost / "meta.json").write_text("not json")
+        rc, err = self.start_session("ghost")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual((ghost / "meta.json").read_text(), "not json")
+
+    def test_session_start_rebinds_this_pane_records(self):
+        self.pane_record("b1-x", "w3_p1", "w3:p1")
+        rc, out = self.start_session("named")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["rebound"], 1)
+        self.assertEqual(self.record("b1-x")["session"], "named")
+        self.assertEqual([r["name"] for r in self.nakama("list")[1]["agents"]], ["b1-x"])
+
+    def test_session_start_rebind_leaves_other_panes_alone(self):
+        self.pane_record("b1-other", "w9_p9", "w9:p9")
+        rc, out = self.start_session("named")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["rebound"], 0)
+        self.assertEqual(self.record("b1-other")["session"], "w9_p9")
+
+    def test_session_start_rejects_second_session_in_one_pane(self):
+        self.assertEqual(self.start_session("alpha", "a")[0], 0)
+        rc, err = self.start_session("beta", "b")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual((err["session"], err["about"]), ("alpha", "a"))
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "beta").exists())
+
+    def test_session_start_rejects_pane_key_name(self):
+        rc, err = self.start_session("w3_p1")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("pane key", err["error"])
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions").exists())
+
+    def test_session_start_leaves_no_temp_file(self):
+        self.assertEqual(self.start_session()[0], 0)
+        files = [p.name for p in
+                 (Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework").iterdir()]
+        self.assertEqual(files, ["meta.json"])
+
     def test_session_resolution_uses_pane_bound_session(self):
         self.assertEqual(self.start_session()[0], 0)
         self.orch_mail("cart-rework", "bound")
@@ -2431,6 +2490,26 @@ Broken role.
         env = {**self.env, "NAKAMA_SESSION": "chosen"}
         self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek", env=env)[1]["messages"]],
                          ["env"])
+
+    def test_session_resolution_ignores_non_dict_meta(self):
+        broken = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "broken"
+        broken.mkdir(parents=True)
+        (broken / "meta.json").write_text("1")
+        self.orch_mail("w3_p1", "pane")
+        self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]],
+                         ["pane"])
+
+    def test_session_resolution_binding_survives_polluted_runner_env(self):
+        os.environ["NAKAMA_SESSION"] = "leaked-from-runner"
+        try:
+            self.setUp()  # rebuilds self.env from the polluted os.environ
+        finally:
+            os.environ.pop("NAKAMA_SESSION", None)
+        self.assertNotIn("NAKAMA_SESSION", self.env)
+        self.assertEqual(self.start_session()[0], 0)
+        self.orch_mail("cart-rework", "bound")
+        self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]],
+                         ["bound"])
 
 
 if __name__ == "__main__":
