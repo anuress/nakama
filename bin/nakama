@@ -522,6 +522,7 @@ def cmd_resume(a):
     require_herdr()
     check_parent_permission()
     rec = load(a.name)
+    was_paused = rec.get("paused", False)
     worktree = Path(rec["worktree"])
     task = agent_dir(rec) / "task.md"
     if not worktree.is_dir():
@@ -547,10 +548,22 @@ def cmd_resume(a):
             out = {"name": rec["name"], "pane": rec["pane"], "worktree": rec["worktree"]}
             emit({**out, "status": "blocked", "stderr": started.stderr.strip()[-300:], "screen": screen(rec["name"])})
 
+    pause_file = agent_dir(rec) / "pause.md"
+    pause_retired = pause_file.exists()
+    if pause_retired:
+        timestamp = int(time.time())
+        archived = pause_file.with_name(f"pause-{timestamp}.done.md")
+        while archived.exists():
+            timestamp += 1
+            archived = pause_file.with_name(f"pause-{timestamp}.done.md")
+        pause_file.rename(archived)
+
     message = ("You are being resumed after a restart. Re-read "
                f".agent/{rec['name']}/task.md and every fix-*.md next to it, check `git log` and `git status` "
                "in this worktree to see what is already done, then continue and write result.md as required.")
     message += progress_note(rec)
+    if pause_retired or was_paused:
+        message += " The earlier pause is over: do not pause again."
     prompted_at = time.time()
     # A read worker keeps its original baseline, so a reviewer crash does not forgive what it did before.
     before = rec["git_before"] if rec["mode"] == "read" and rec.get("git_before") else git_state(rec)

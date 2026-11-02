@@ -564,6 +564,53 @@ class NakamaTest(unittest.TestCase):
         self.assertIn("git status", prompt[-1])
         self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0")[1]["status"], "failed")
 
+    def test_resume_retires_pause_file(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        rc, paused = self.nakama("pause", out["name"], "--timeout", "0")
+        self.assertEqual(rc, 0, paused)
+        self.assertEqual(paused["status"], "paused_forced")
+        pause_file = Path(out["dir"], "pause.md")
+        self.assertTrue(pause_file.is_file())
+        self.nakama("teardown", out["name"])
+
+        rc, resumed = self.nakama("resume", out["name"])
+        self.assertEqual((rc, resumed["status"]), (0, "fresh_primed"))
+        self.assertFalse(pause_file.exists())
+        self.assertEqual(len(list(pause_file.parent.glob("pause-*.done.md"))), 1)
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertIn("The earlier pause is over", prompts[-1][-1])
+
+    def test_resume_does_not_overwrite_retired_pause_file(self):
+        out = self.launch()
+        self.task(out)
+        self.set_state(status="working")
+        self.nakama("pause", out["name"], "--timeout", "0")
+        pause_file = Path(out["dir"], "pause.md")
+        pause_contents = pause_file.read_text()
+        self.nakama("teardown", out["name"])
+
+        archived = Path(out["dir"], "pause-1700000000.done.md")
+        archived.write_text("keep")
+        clock = self.root / "frozen-clock"
+        clock.mkdir()
+        (clock / "sitecustomize.py").write_text("import time\ntime.time = lambda: 1700000000\n")
+        rc, resumed = self.nakama("resume", out["name"], env={**self.env, "PYTHONPATH": str(clock)})
+        self.assertEqual((rc, resumed["status"]), (0, "fresh_primed"))
+        self.assertEqual(archived.read_text(), "keep")
+        self.assertEqual(Path(out["dir"], "pause-1700000001.done.md").read_text(), pause_contents)
+
+    def test_resume_without_pause_has_no_pause_note(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("teardown", out["name"])
+
+        rc, resumed = self.nakama("resume", out["name"])
+        self.assertEqual((rc, resumed["status"]), (0, "fresh_primed"))
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertNotIn("The earlier pause is over", prompts[-1][-1])
+
     def test_resume_cleans_up_old_surface_and_gh_config_for_dead_workers(self):
         for layout in ("tab", "split"):
             out = self.launch("--layout", layout)
