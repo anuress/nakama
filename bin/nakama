@@ -428,6 +428,16 @@ def close_worker_surface(rec):
         shutil.rmtree(rec["gh_config_dir"], ignore_errors=True)
 
 
+def stop_worker(rec):
+    """Interrupt a worker that will not write a Resume note, then drop any index lock it left held."""
+    run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
+    close_worker_surface(rec)
+    lock = run(["git", "rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
+               cwd=rec["worktree"], check=False)
+    if lock.returncode == 0 and lock.stdout.strip():
+        Path(lock.stdout.strip()).unlink(missing_ok=True)
+
+
 def start_worker(rec, meta, layout="tab", direction="right"):
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
     # Target the caller's own workspace/pane: herdr's defaults follow focus, which may be elsewhere.
@@ -523,6 +533,7 @@ def cmd_resume(a):
     check_parent_permission()
     rec = load(a.name)
     was_paused = rec.get("paused", False)
+    was_forced = rec.get("paused_forced", False)
     worktree = Path(rec["worktree"])
     task = agent_dir(rec) / "task.md"
     if not worktree.is_dir():
@@ -564,6 +575,9 @@ def cmd_resume(a):
     message += progress_note(rec)
     if pause_retired or was_paused:
         message += " The earlier pause is over: do not pause again."
+    if was_forced:
+        message += (" The earlier pause was forced before a Resume note was written: check every uncommitted "
+                    "file for half-finished edits before continuing.")
     prompted_at = time.time()
     # A read worker keeps its original baseline, so a reviewer crash does not forgive what it did before.
     before = rec["git_before"] if rec["mode"] == "read" and rec.get("git_before") else git_state(rec)
@@ -815,6 +829,7 @@ def cmd_pause(a):
 
     results = {}
     pending = []
+    unreachable = []
     for rec in selected:
         if rec["mode"] == "read":
             results[rec["name"]] = {"name": rec["name"], "status": "skipped", "reason": "read_only"}
@@ -837,12 +852,16 @@ def cmd_pause(a):
             "has ## Steps, and a ## Resume section: what was in flight, the exact next action, and the "
             "uncommitted files and their state. Then stop.\n")
         sent_at = time.time()
-        send_one(ORCH, rec["name"], "info", pause_file, None)
+        sent = send_one(ORCH, rec["name"], "info", pause_file, None)
         rec["pause_sent_at"] = sent_at
         save(rec)
-        pending.append((rec, sent_at))
+        if sent.get("pushed"):
+            pending.append((rec, sent_at))
+        else:
+            # No live agent will read the note: waiting on it would only burn the timeout.
+            unreachable.append((rec, sent_at))
 
-    had_recipients = bool(pending)
+    had_recipients = bool(pending or unreachable)
     deadline = time.time() + a.timeout
     noted = {}
     while pending:
@@ -873,7 +892,10 @@ def cmd_pause(a):
                 "steps": steps_info(rec), "dirty": dirty,
             }
             continue
-        close_worker_surface(rec)
+        if was_noted:
+            close_worker_surface(rec)
+        else:
+            stop_worker(rec)
         rec.update(closed=True, paused=True, paused_forced=not was_noted)
         save(rec)
         results[rec["name"]] = {

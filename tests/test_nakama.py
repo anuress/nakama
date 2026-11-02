@@ -1528,6 +1528,67 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertFalse(rec["paused_forced"])
         self.assertIsNone(rec["pause_sent_at"])
 
+    def test_pause_forces_unreachable_worker_once_and_clears_index_lock(self):
+        out = self.launch()
+        worktree = out["worktree"]
+        self.wgit(worktree, "init", "-q", "-b", "main")
+        self.wgit(worktree, "commit", "-q", "--allow-empty", "-m", "root")
+        lock = Path(worktree, ".git", "index.lock")
+        lock.write_text("")
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working", prompt_fail=[out["name"]])
+        started = time.monotonic()
+        rc, result = self.nakama("pause", out["name"], "--timeout", "30")
+        elapsed = time.monotonic() - started
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["status"], "paused_forced")
+        self.assertLess(elapsed, 10)
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"] and rec["paused_forced"])
+        calls = self.calls()
+        keys = calls.index(["herdr", "agent", "send-keys", out["name"], "ctrl+c", "ctrl+c"])
+        self.assertLess(keys, calls.index(["herdr", "tab", "close", rec["tab"]]))
+        self.assertFalse(lock.exists())
+
+    def test_pause_timeout_forced_worker_interrupts_and_clears_index_lock(self):
+        out = self.launch()
+        worktree = out["worktree"]
+        self.wgit(worktree, "init", "-q", "-b", "main")
+        self.wgit(worktree, "commit", "-q", "--allow-empty", "-m", "root")
+        lock = Path(worktree, ".git", "index.lock")
+        lock.write_text("")
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"],
+                         "paused_forced")
+        self.assertIn(["herdr", "agent", "send-keys", out["name"], "ctrl+c", "ctrl+c"], self.calls())
+        self.assertFalse(lock.exists())
+
+    def test_resume_after_forced_pause_warns_about_half_finished_edits(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"],
+                         "paused_forced")
+        self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertIn("The earlier pause was forced before a Resume note was written", prompts[-1][-1])
+
+    def test_resume_after_noted_pause_has_no_forced_warning(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="idle", write_on_prompt={
+            "path": self.result(out), "text": "Status: partial\n## Resume\nfinish\n"})
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "5")[1]["status"], "paused")
+        self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertNotIn("was forced before a Resume note was written", prompts[-1][-1])
+        self.assertIn("The earlier pause is over", prompts[-1][-1])
+
     def test_pause_requires_exactly_one_name_or_all(self):
         rc, missing = self.nakama("pause")
         self.assertEqual(rc, 2)
