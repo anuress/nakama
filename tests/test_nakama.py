@@ -1562,6 +1562,21 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         rec = self.record(reviewer["name"])
         self.assertTrue(rec["closed"])
         self.assertFalse(rec.get("paused", False))
+        self.assertEqual(rec.get("spent_min", 0), 0)  # never prompted, so nothing to bank
+
+    def test_pause_all_stop_banks_read_only_spent_min(self):
+        reviewer = self.nakama("launch", "reviewer", "review", "--no-worktree")[1]
+        self.task(reviewer)
+        self.nakama("prompt", reviewer["name"], "task.md")
+        self.set_state(status="working")
+        record = self.root / "records" / f"{reviewer['name']}.json"
+        rec = json.loads(record.read_text())
+        rec["prompted_at"] -= 10 * 60
+        record.write_text(json.dumps(rec))
+        rc, result = self.nakama("pause", "--all", "--timeout", "30")
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(result["results"][0]["status"], "stopped")
+        self.assertGreaterEqual(self.record(reviewer["name"])["spent_min"], 9.9)
 
     def test_pause_all_uses_one_shared_deadline(self):
         workers = [self.launch() for _ in range(3)]
@@ -1610,6 +1625,25 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertFalse(rec["paused_forced"])
         self.assertIsNone(rec["pause_sent_at"])
 
+    def test_resume_restart_failure_keeps_paused_flags_and_retry_warns(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"],
+                         "paused_forced")
+        self.set_state(status=None, start_rc=1)
+        rc, blocked = self.nakama("resume", out["name"])
+        self.assertEqual((rc, blocked["status"]), (0, "blocked"))
+        rec = self.record(out["name"])
+        self.assertTrue(rec["paused"] and rec["paused_forced"])
+        self.set_state(status=None, start_rc=0)
+        self.assertEqual(self.nakama("resume", out["name"])[1]["status"], "fresh_primed")
+        prompts = [c for c in self.calls() if c[1:3] == ["agent", "prompt"]]
+        self.assertIn("The earlier pause was forced before a Resume note was written", prompts[-1][-1])
+        rec = self.record(out["name"])
+        self.assertFalse(rec["paused"] or rec["paused_forced"])
+
     def test_pause_forces_unreachable_worker_once_and_clears_index_lock(self):
         out = self.launch()
         worktree = out["worktree"]
@@ -1632,6 +1666,20 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         keys = calls.index(["herdr", "agent", "send-keys", out["name"], "ctrl+c", "ctrl+c"])
         self.assertLess(keys, calls.index(["herdr", "tab", "close", rec["tab"]]))
         self.assertFalse(lock.exists())
+
+    def test_forced_pause_keeps_orchestrator_index_lock_for_no_worktree_worker(self):
+        self.wgit(self.root, "init", "-q", "-b", "main")
+        lock = Path(self.root, ".git", "index.lock")
+        lock.write_text("")
+        out = self.launch("--no-worktree")
+        self.assertIsNone(self.record(out["name"])["branch"])
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        self.assertEqual(self.nakama("pause", out["name"], "--timeout", "0")[1]["status"],
+                         "paused_forced")
+        self.assertIn(["herdr", "agent", "send-keys", out["name"], "ctrl+c", "ctrl+c"], self.calls())
+        self.assertTrue(lock.exists())  # that checkout belongs to the orchestrator, not the worker
 
     def test_pause_timeout_forced_worker_interrupts_and_clears_index_lock(self):
         out = self.launch()

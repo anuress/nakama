@@ -439,6 +439,9 @@ def stop_worker(rec):
     """Interrupt a worker that will not write a Resume note, then drop any index lock it left held."""
     run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
     close_worker_surface(rec)
+    if not rec.get("branch"):
+        # --no-worktree workers run in the orchestrator's own checkout: that lock is not ours to delete.
+        return
     lock = run(["git", "rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
                cwd=rec["worktree"], check=False)
     if lock.returncode == 0 and lock.stdout.strip():
@@ -558,8 +561,9 @@ def cmd_resume(a):
     if state is None:
         if not rec.get("closed"):
             close_worker_surface(rec)
-        rec.update(closed=False, paused=False, paused_forced=False, pause_sent_at=None,
-                   prompted_at=None, nudged_at=None,
+        # Keep paused/paused_forced/pause_sent_at: if the start or the prompt below fails, the record
+        # must still say it is paused, or a retry of `resume` loses the forced-pause warning.
+        rec.update(closed=False, prompted_at=None, nudged_at=None,
                    screen_sig=None, screen_changed_at=None)
         started = start_worker(rec, meta, layout, rec.get("direction", "right"))
         if started.returncode != 0:
@@ -844,7 +848,8 @@ def cmd_pause(a):
             # A read worker holds no uncommitted work: --all stops it instead of pausing it.
             run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
             close_worker_surface(rec)
-            rec.update(closed=True)
+            # Bank the time spent, so relaunching it does not hand out a fresh budget.
+            rec.update(closed=True, spent_min=spent_minutes(rec))
             save(rec)
             stopped = True
             results[rec["name"]] = {"name": rec["name"], "status": "stopped", "reason": "read_only"}
