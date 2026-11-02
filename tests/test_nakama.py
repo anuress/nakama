@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1574,6 +1575,28 @@ print(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
         self.assertEqual(rc, 0, result)
         self.assertLess(elapsed, 2.5)
         self.assertEqual([worker["status"] for worker in result["results"]], ["paused_forced"] * 3)
+
+    def test_pause_interrupted_by_ctrl_c_finishes_classification(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        self.set_state(status="working")
+        proc = subprocess.Popen(
+            [sys.executable, str(NAKAMA), "pause", out["name"], "--timeout", "30"],
+            env=self.env, cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pause_file = Path(out["dir"], "pause.md")
+        deadline = time.monotonic() + 15
+        while not pause_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(pause_file.exists())
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGINT)
+        stdout, stderr = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0, stderr)
+        result = json.loads(stdout)
+        self.assertEqual((result["status"], result["interrupted"]), ("paused_forced", True))
+        rec = self.record(out["name"])
+        self.assertTrue(rec["closed"] and rec["paused"])
 
     def test_resume_after_pause_clears_paused_flags(self):
         out = self.launch()

@@ -879,18 +879,23 @@ def cmd_pause(a):
     had_recipients = bool(pending or unreachable or stopped)
     deadline = time.time() + a.timeout
     noted = {}
-    while pending:
-        for rec, sent_at in pending:
-            result = agent_dir(rec) / "result.md"
-            if (result.is_file() and result.stat().st_mtime > sent_at
-                    and agent_status(rec["name"]) in ("idle", "done", None)):
-                _, result_status, _ = parse_result_status(result.read_text())
-                noted[rec["name"]] = result_status
-        pending = [(rec, sent_at) for rec, sent_at in pending if rec["name"] not in noted]
-        remaining = deadline - time.time()
-        if not pending or remaining <= 0:
-            break
-        time.sleep(min(max(POLL_SEC, 0.01), remaining))
+    interrupted = False
+    try:
+        while pending:
+            for rec, sent_at in pending:
+                result = agent_dir(rec) / "result.md"
+                if (result.is_file() and result.stat().st_mtime > sent_at
+                        and agent_status(rec["name"]) in ("idle", "done", None)):
+                    _, result_status, _ = parse_result_status(result.read_text())
+                    noted[rec["name"]] = result_status
+            pending = [(rec, sent_at) for rec, sent_at in pending if rec["name"] not in noted]
+            remaining = deadline - time.time()
+            if not pending or remaining <= 0:
+                break
+            time.sleep(min(max(POLL_SEC, 0.01), remaining))
+    except KeyboardInterrupt:
+        # Stop waiting, but finish the job: noted workers park, the rest are forced as on a timeout.
+        interrupted = True
 
     for rec in selected:
         if rec["name"] in results:
@@ -920,9 +925,10 @@ def cmd_pause(a):
             "steps": steps_info(rec), "dirty": dirty,
         }
     ordered = [results[rec["name"]] for rec in selected]
+    extra = {"interrupted": True} if interrupted else {}
     if a.all:
-        emit({"status": "paused" if had_recipients else "no_recipients", "results": ordered})
-    emit(ordered[0])
+        emit({"status": "paused" if had_recipients else "no_recipients", "results": ordered, **extra})
+    emit({**ordered[0], **extra})
 
 
 def cmd_teardown(a):
