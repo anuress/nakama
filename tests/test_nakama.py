@@ -1175,6 +1175,34 @@ class NakamaTest(unittest.TestCase):
         self.assertEqual(result["status"], "stalled")
         self.assertEqual(result["screen"], screen + "\n")
 
+    def test_wait_not_stalled_when_output_scrolls_above_fixed_footer(self):
+        out = self.launch()
+        self.task(out)
+        self.nakama("prompt", out["name"], "task.md")
+        footer = """Todos 1/4
+✓ Read the task
+▶ Implement the change
+○ Run focused tests
+○ Write the final report
+── ⠙ Working ─────────────────────────
+──────────────────────────────────────
+~/work (branch)
+↑96 ↓47k R860k W248k CH26.9% $0.063 18.5%/272k (auto) (provider) model • max
+provider · model · thinking max · session $0.06"""
+        first = "Changing output line one\n" + footer
+        second = "Changing output line two\n" + footer
+        env = {**self.env, "NAKAMA_STALL_SEC": "0"}
+        self.set_state(status="working", screen=first)
+        self.assertEqual(self.nakama("wait", out["name"], "--timeout", "0", env=env)[1]["status"], "running")
+        record = self.root / "records" / f"{out['name']}.json"
+        before = json.loads(record.read_text())
+
+        self.set_state(status="working", screen=second)
+        _, result = self.nakama("wait", out["name"], "--timeout", "0", env=env)
+        after = json.loads(record.read_text())
+        self.assertEqual(result["status"], "running")
+        self.assertNotEqual(after["screen_sig"], before["screen_sig"])
+
     def test_changed_screen_words_reset_stall_timer(self):
         out = self.launch()
         self.task(out)

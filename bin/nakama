@@ -666,7 +666,7 @@ def cmd_wait(a):
             tail = [line for line in current.splitlines() if line.strip()][-10:]
             if any(marker in line for line in tail for marker in PROMPT_MARKERS):
                 done("blocked", screen=current)
-            screen_sig = re.sub(r"[^A-Za-z]+", "", "\n".join(tail))
+            screen_sig = re.sub(r"[^A-Za-z]+", "", current)
             now = time.time()
             if screen_sig != rec.get("screen_sig"):
                 rec.update(screen_sig=screen_sig, screen_changed_at=now)
