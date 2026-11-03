@@ -3296,6 +3296,321 @@ Broken role.
         self.assertIn("brief", text)
         self.assertIn("read-only bearings", text)
 
+    def write_jsonl(self, path, lines):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return path
+
+    def pi_meta(self, name, path):
+        self.named_meta(name, "w3:p1", agent={"agent": "pi", "kind": "path", "value": str(path),
+                                              "source": "herdr:pi", "cwd": str(self.root)})
+        return {**self.env, "NAKAMA_SESSION": name}
+
+    def claude_meta(self, name, uuid, home):
+        self.named_meta(name, "w3:p1", agent={"agent": "claude", "kind": "id", "value": uuid,
+                                              "source": "herdr:claude", "cwd": str(self.root)})
+        return {**self.env, "NAKAMA_SESSION": name, "HOME": str(home)}
+
+    def digest(self, *extra, env=None):
+        return self.nakama("digest", *extra, env=env)
+
+    def test_digest_renders_pi_transcript(self):
+        lines = [
+            {"type": "session", "version": 3, "id": "s1", "cwd": "/x"},
+            {"type": "model_change", "model": "m"},
+            {"type": "message", "timestamp": "2026-01-01T00:00:01Z",
+             "message": {"role": "user", "content": [{"type": "text", "text": "hello prompt"}]}},
+            {"type": "message", "timestamp": "2026-01-01T00:00:02Z",
+             "message": {"role": "assistant", "content": [
+                 {"type": "thinking", "thinking": "secret-thought"},
+                 {"type": "text", "text": "answer text"},
+                 {"type": "toolCall", "name": "bash", "arguments": {"command": "ls"}}]}},
+            {"type": "message", "timestamp": "2026-01-01T00:00:03Z",
+             "message": {"role": "toolResult", "toolName": "bash",
+                         "content": [{"type": "text", "text": "file.txt"}]}},
+            {"type": "compaction", "timestamp": "2026-01-01T00:00:04Z", "summary": "earlier summary"},
+        ]
+        path = self.write_jsonl(self.root / "pi.jsonl", lines)
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        text = out["text"]
+        self.assertEqual(out["messages"], 4)
+        self.assertEqual((out["matched"], out["total"]), (4, 4))
+        self.assertIsNone(out["path"])
+        self.assertFalse(out["truncated"])
+        self.assertLess(text.index("### user · 2026-01-01T00:00:01Z"), text.index("### assistant"))
+        self.assertNotIn("secret-thought", text)
+        self.assertIn("`bash({\"command\": \"ls\"})`", text)
+        self.assertIn("`bash: file.txt`", text)
+        self.assertLess(text.index("### assistant"), text.index("### tool"))
+        self.assertLess(text.index("### tool"), text.index("### summary"))
+        self.assertIn("earlier summary", text)
+
+    def test_digest_renders_claude_transcript(self):
+        home = self.root / "home"
+        uuid = "5f0c-uuid"
+        lines = [
+            {"type": "mode", "mode": "default"},
+            {"type": "user", "timestamp": "t1", "message": {"role": "user", "content": "plain prompt"}},
+            {"type": "assistant", "timestamp": "t2", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hidden-thought"},
+                {"type": "text", "text": "claude answer"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "pwd"}}]}},
+            {"type": "user", "timestamp": "t3", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "output text"}]}},
+            {"type": "api-request-blob",
+             "message": {"role": "user", "content": [{"type": "text", "text": "blob-secret"}]}},
+            {"type": "assistant", "isSidechain": True, "timestamp": "t4",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "sidechain-secret"}]}},
+        ]
+        path = home / ".claude" / "projects" / "-x" / f"{uuid}.jsonl"
+        self.write_jsonl(path, lines)
+        rc, out = self.digest("--stdout", env=self.claude_meta("cart-rework", uuid, home))
+        self.assertEqual(rc, 0, out)
+        text = out["text"]
+        self.assertEqual(out["messages"], 3)
+        self.assertIn("plain prompt", text)
+        self.assertIn("`Bash({\"command\": \"pwd\"})`", text)
+        self.assertIn("`result: output text`", text)
+        self.assertIn("### tool · t3", text)
+        self.assertNotIn("blob-secret", text)
+        self.assertNotIn("sidechain-secret", text)
+        self.assertNotIn("hidden-thought", text)
+
+    def test_digest_truncates_tool_args_and_assistant_text(self):
+        arg = "a" * 300
+        assistant = "a" * 3000 + "needle" + "b" * 994
+        lines = [
+            {"type": "message", "timestamp": "t1", "message": {"role": "user",
+             "content": [{"type": "text", "text": "u" * 4000}]}},
+            {"type": "message", "timestamp": "t2", "message": {"role": "assistant",
+             "content": [{"type": "text", "text": assistant}]}},
+            {"type": "message", "timestamp": "t3", "message": {"role": "assistant",
+             "content": [{"type": "toolCall", "name": "bash", "arguments": {"x": arg}}]}},
+        ]
+        path = self.write_jsonl(self.root / "pi.jsonl", lines)
+        env = self.pi_meta("cart-rework", path)
+        rc, out = self.digest("--stdout", env=env)
+        self.assertEqual(rc, 0, out)
+        text = out["text"]
+        self.assertIn("u" * 4000, text)
+        expected_preview = json.dumps({"x": arg}, ensure_ascii=False)[:120] + "…"
+        self.assertIn(f"`bash({expected_preview})`", text)
+        self.assertIn(assistant.encode()[:1536].decode() + " … [cut]", text)
+        rc, out = self.digest("--stdout", "--grep", "needle", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["messages"], out["matched"]), (1, 1))
+
+    def test_digest_max_bytes_drops_oldest_first(self):
+        lines = [{"type": "message", "timestamp": "t", "message": {
+            "role": "user", "content": [{"type": "text", "text": f"msg-{i:02d}" + "x" * 94}]}}
+            for i in range(50)]
+        path = self.write_jsonl(self.root / "pi.jsonl", lines)
+        rc, out = self.digest("--stdout", "--max-bytes", "2048", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        text = out["text"]
+        self.assertIn("msg-49", text)
+        self.assertNotIn("msg-00", text)
+        self.assertGreater(out["dropped"], 0)
+        self.assertEqual(out["messages"], text.count("### user"))
+        self.assertIn(f"… {out['dropped']} older messages dropped to fit 2048 bytes", text)
+        self.assertLessEqual(out["bytes"], 2048)
+        self.assertEqual(out["bytes"], len(text.encode()))
+
+    def test_digest_single_message_over_cap_is_truncated(self):
+        lines = [f"line-{i:03d}-" + "y" * 71 for i in range(70)]
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "\n".join(lines)}]}}])
+        rc, out = self.digest("--stdout", "--max-bytes", "1024", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["truncated"])
+        self.assertLessEqual(out["bytes"], 1024)
+        footer = "\n… truncated at 1024 bytes\n"
+        self.assertTrue(out["text"].endswith(footer))
+        before = out["text"][:-len(footer)]
+        self.assertIn(before.split("\n")[-1], lines)
+
+    def test_digest_grep_filters_before_tail(self):
+        lines = [{"type": "message", "timestamp": "t", "message": {"role": "user",
+                  "content": [{"type": "text", "text": body}]}}
+                 for body in ("needle one", "needle two", "after no match")]
+        path = self.write_jsonl(self.root / "pi.jsonl", lines)
+        rc, out = self.digest("--stdout", "--grep", "needle", "--tail", "1",
+                              env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["messages"], out["matched"], out["total"]), (1, 2, 3))
+        self.assertIn("needle two", out["text"])
+        self.assertNotIn("needle one", out["text"])
+        self.assertNotIn("after no match", out["text"])
+
+    def test_digest_writes_file_and_stdout_writes_nothing(self):
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "hello"}]}}])
+        env = self.pi_meta("cart-rework", path)
+        rc, out = self.digest(env=env)
+        self.assertEqual(rc, 0, out)
+        digest_path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework" / "digest.md"
+        self.assertEqual(out["path"], str(digest_path))
+        self.assertTrue(digest_path.is_file())
+        self.assertIn("hello", digest_path.read_text())
+        self.assertNotIn("text", out)
+        digest_path.unlink()
+        rc, out = self.digest("--stdout", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(out["path"])
+        self.assertIn("hello", out["text"])
+        self.assertFalse(digest_path.exists())
+        self.assertEqual(list(digest_path.parent.glob("*.tmp")), [])
+
+    def test_digest_missing_transcript_names_path(self):
+        missing = self.root / "nope.jsonl"
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", missing))
+        self.assertEqual(rc, 2, out)
+        self.assertIn(str(missing), out["error"])
+        home = self.root / "home"
+        uuid = "abc-123"
+        rc, out = self.digest("--stdout", env=self.claude_meta("cart-rework", uuid, home))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("projects/*/", out["error"])
+        self.assertIn(uuid, out["error"])
+
+    def test_digest_requires_named_session_and_token(self):
+        rc, out = self.digest("--stdout")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("nakama session start", out["error"])
+        self.named_meta("cart-rework", "w3:p1", agent=None)
+        rc, out = self.digest("--stdout", env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("transcript", out["error"])
+
+    def test_digest_skips_corrupt_lines(self):
+        good = {"type": "message", "timestamp": "t1", "message": {
+            "role": "user", "content": [{"type": "text", "text": "good"}]}}
+        no_ts = {"type": "message", "message": {
+            "role": "user", "content": [{"type": "text", "text": "no ts"}]}}
+        pi_bytes = b"\n".join([
+            json.dumps(good).encode(),
+            json.dumps({"type": "message"}).encode(),
+            json.dumps({"type": "message", "message": {"role": "user", "content": None}}).encode(),
+            json.dumps({"type": "message", "message": {
+                "role": "user", "content": [{"type": "bogus"}]}}).encode(),
+            json.dumps(no_ts).encode(),
+            b'{"type": "message"',
+            b'"\xc3',
+        ])
+        path = self.root / "pi.jsonl"
+        path.write_bytes(pi_bytes)
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["messages"], 2)
+        self.assertIn("good", out["text"])
+        self.assertIn("### user · ?", out["text"])
+
+        good = {"type": "user", "timestamp": "t1", "message": {"role": "user", "content": "good"}}
+        no_ts = {"type": "user", "message": {
+            "role": "user", "content": [{"type": "text", "text": "no ts"}]}}
+        claude_bytes = b"\n".join([
+            json.dumps(good).encode(),
+            json.dumps({"type": "user"}).encode(),
+            json.dumps({"type": "user", "message": {"role": "user", "content": None}}).encode(),
+            json.dumps({"type": "user", "message": {
+                "role": "user", "content": [{"type": "bogus"}]}}).encode(),
+            json.dumps(no_ts).encode(),
+            b'{"type": "user"',
+            b'"\xc3',
+        ])
+        home = self.root / "home"
+        uuid = "corrupt-1"
+        claude_path = home / ".claude" / "projects" / "-x" / f"{uuid}.jsonl"
+        claude_path.parent.mkdir(parents=True)
+        claude_path.write_bytes(claude_bytes)
+        rc, out = self.digest("--stdout", env=self.claude_meta("cart-rework", uuid, home))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["messages"], 2)
+        self.assertIn("good", out["text"])
+        self.assertIn("### user · ?", out["text"])
+
+    def test_digest_rejects_bad_options(self):
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "hello"}]}}])
+        env = self.pi_meta("cart-rework", path)
+        for extra in (["--grep", "["], ["--tail", "0"], ["--max-bytes", "10"]):
+            rc, out = self.digest("--stdout", *extra, env=env)
+            self.assertEqual(rc, 2, (extra, out))
+            self.assertIn("error", out)
+
+    def test_digest_help_listed(self):
+        text = self.help_text()
+        self.assertIn("digest", text)
+        self.assertIn("markdown digest", text)
+
+    def test_digest_empty_and_no_match(self):
+        path = self.root / "empty.jsonl"
+        path.write_text("")
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["messages"], out["dropped"], out["truncated"]), (0, 0, False))
+        self.assertIn("# Digest: cart-rework", out["text"])
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "hello"}]}}])
+        rc, out = self.digest("--stdout", "--grep", "absent", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["messages"], out["matched"]), (0, 0))
+        self.assertIn("# Digest: cart-rework", out["text"])
+
+    def test_digest_claude_token_validation(self):
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        self.named_meta("cart-rework", "w3:p1", agent={
+            "agent": "claude", "kind": "path", "value": "x", "source": "s", "cwd": "/x"})
+        rc, out = self.digest("--stdout", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("error", out)
+        self.named_meta("cart-rework", "w3:p1", agent={
+            "agent": "claude", "kind": "id", "value": "../x", "source": "s", "cwd": "/x"})
+        rc, out = self.digest("--stdout", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("error", out)
+
+    def test_digest_mixed_claude_user_line(self):
+        home = self.root / "home"
+        uuid = "mix-1"
+        self.write_jsonl(home / ".claude" / "projects" / "-x" / f"{uuid}.jsonl", [
+            {"type": "user", "timestamp": "t1", "message": {"role": "user", "content": [
+                {"type": "text", "text": "please run"},
+                {"type": "tool_result", "tool_use_id": "tu1",
+                 "content": [{"type": "text", "text": "the output"}]}]}}])
+        rc, out = self.digest("--stdout", env=self.claude_meta("cart-rework", uuid, home))
+        self.assertEqual(rc, 0, out)
+        text = out["text"]
+        self.assertIn("### user · t1", text)
+        self.assertLess(text.index("please run"), text.index("the output"))
+        self.assertIn("`result: the output`", text)
+
+    def test_digest_file_mode_and_write_failure(self):
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "hello"}]}}])
+        env = self.pi_meta("cart-rework", path)
+        rc, out = self.digest(env=env)
+        self.assertEqual(rc, 0, out)
+        digest_path = Path(out["path"])
+        self.assertEqual(os.stat(digest_path).st_mode & 0o777, 0o600)
+        digest_path.unlink()
+        session = digest_path.parent
+        session.chmod(0o500)
+        try:
+            rc, out = self.digest(env=env)
+        finally:
+            session.chmod(0o700)
+        self.assertEqual(rc, 2, out)
+        self.assertIn(str(digest_path), out["error"])
+        self.assertEqual(sorted(p.name for p in session.iterdir()), ["meta.json"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

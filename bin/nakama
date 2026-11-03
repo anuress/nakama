@@ -1488,6 +1488,217 @@ def cmd_brief(a):
           "warnings": warnings})
 
 
+def digest_cut(text, limit):
+    return text[:limit] + "…" if len(text) > limit else text
+
+
+def digest_result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content
+                       if isinstance(part, dict) and part.get("type") == "text"
+                       and isinstance(part.get("text"), str))
+    return ""
+
+
+def digest_tool_call(name, args):
+    return f"`{name}({digest_cut(json.dumps(args, ensure_ascii=False), 120)})`"
+
+
+def digest_tool_result(content):
+    return f"`result: {digest_cut(digest_result_text(content), 200)}`"
+
+
+def digest_pi_message(line):
+    ts = line.get("timestamp") if isinstance(line.get("timestamp"), str) else "?"
+    if line.get("type") == "compaction":
+        summary = line.get("summary")
+        return ("summary", ts, [summary]) if isinstance(summary, str) else None
+    if line.get("type") != "message":
+        return None
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        return None
+    role, content = msg.get("role"), msg.get("content")
+    if not isinstance(content, (str, list)):
+        return None
+    if role == "toolResult":
+        name = msg.get("toolName") if isinstance(msg.get("toolName"), str) else "result"
+        return ("tool", ts, [f"`{name}: {digest_cut(digest_result_text(content), 200)}`"])
+    if role not in ("user", "assistant"):
+        return None  # system and anything unknown
+    blocks = []
+    for part in content if isinstance(content, list) else [{"type": "text", "text": content}]:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and isinstance(part.get("text"), str):
+            blocks.append(part["text"])
+        elif part.get("type") == "image":
+            blocks.append("[image]")
+        elif part.get("type") == "toolCall" and isinstance(part.get("name"), str):
+            blocks.append(digest_tool_call(part["name"], part.get("arguments")))
+    return (role, ts, blocks) if blocks else None
+
+
+def digest_claude_message(line):
+    if line.get("isSidechain") is True or line.get("type") not in ("user", "assistant"):
+        return None
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        return None
+    ts = line.get("timestamp") if isinstance(line.get("timestamp"), str) else "?"
+    content = msg.get("content")
+    if isinstance(content, str):
+        return (line["type"], ts, [content]) if content else None
+    if not isinstance(content, list):
+        return None
+    blocks, has_text = [], False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "tool_result":
+            blocks.append(digest_tool_result(part.get("content")))
+        elif ptype == "text" and isinstance(part.get("text"), str):
+            blocks.append(part["text"])
+            has_text = True
+        elif ptype == "image":
+            blocks.append("[image]")
+            has_text = True
+        elif ptype == "tool_use" and isinstance(part.get("name"), str):
+            blocks.append(digest_tool_call(part["name"], part.get("input")))
+            has_text = True
+    if not blocks:
+        return None
+    # A user line holding only tool results is the tool turn, not a prompt.
+    return ("user" if has_text or line["type"] == "assistant" else "tool", ts, blocks)
+
+
+def digest_body(role, blocks):
+    body = "\n\n".join(blocks)
+    if role not in ("assistant", "summary"):
+        return body
+    data = body.encode()
+    return body if len(data) <= 1536 else data[:1536].decode("utf-8", "ignore") + " … [cut]"
+
+
+def digest_document(key, transcript, agent, msgs, matched, total, dropped, max_bytes):
+    lines = [f"# Digest: {key}", "", f"Transcript: {transcript} ({agent})",
+             f"Messages: {len(msgs)} of {matched} matched, {total} total"]
+    if dropped:
+        lines.append(f"… {dropped} older messages dropped to fit {max_bytes} bytes")
+    if msgs:
+        rendered = [f"### {role} · {ts}\n\n{digest_body(role, blocks)}" for role, ts, blocks in msgs]
+        lines.extend(["", "\n\n".join(rendered)])
+    return "\n".join(lines)
+
+
+def digest_truncate(document, max_bytes):
+    footer = f"\n… truncated at {max_bytes} bytes\n"
+    prefix = document.encode()[:max_bytes - len(footer.encode())]
+    cut = prefix.rfind(b"\n")
+    if cut != -1:
+        prefix = prefix[:cut]  # keep the last whole line, never half a heading
+    return prefix.decode("utf-8", "ignore") + footer
+
+
+def digest_write(path, document):
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(document.encode())
+        os.replace(tmp, path)
+    except OSError as e:
+        emit({"error": f"cannot write digest {path}: {e}"}, 2)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def cmd_digest(a):
+    require_herdr()
+    if a.tail < 1:
+        emit({"error": "--tail must be at least 1"}, 2)
+    if a.max_bytes < 1024:
+        emit({"error": "--max-bytes must be at least 1024"}, 2)
+    try:
+        pattern = re.compile(a.grep, re.I) if a.grep is not None else None
+    except re.error as e:
+        emit({"error": f"invalid --grep pattern: {e}"}, 2)
+
+    key = session_key(current_session())
+    meta = session_meta(key)
+    if meta is None:
+        emit({"error": f"session {key} is not named; run: nakama session start <name> --about \"...\""}, 2)
+    token = meta.get("agent")
+    if not isinstance(token, dict) or not isinstance(token.get("value"), str):
+        emit({"error": f"no transcript recorded for session {key} (captured on `session start` and `launch`)"}, 2)
+    agent = token.get("agent")
+    if agent == "pi":
+        if token.get("kind") != "path":
+            emit({"error": f"pi transcript token has kind {token.get('kind')!r}, expected 'path'"}, 2)
+        transcript = Path(token["value"])
+    elif agent == "claude":
+        if token.get("kind") != "id" or not re.fullmatch(r"[A-Za-z0-9-]+", token["value"]):
+            emit({"error": "claude transcript token must have kind 'id' and a plain uuid value"}, 2)
+        glob = f"{HOME}/.claude/projects/*/{token['value']}.jsonl"
+        matches = sorted(HOME.glob(f".claude/projects/*/{token['value']}.jsonl"))
+        if not matches:
+            emit({"error": f"no Claude Code transcript found for {token['value']} (looked for {glob})"}, 2)
+        transcript = matches[0]
+    else:
+        emit({"error": f"unsupported orchestrator agent {agent!r}"}, 2)
+
+    try:
+        data = transcript.read_bytes()
+    except OSError as e:
+        emit({"error": f"cannot read transcript {transcript}: {e}"}, 2)
+    normalise = digest_pi_message if agent == "pi" else digest_claude_message
+    messages = []
+    for raw in data.split(b"\n"):
+        try:
+            line = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            continue  # a live transcript may end mid-write, even mid-character
+        if not isinstance(line, dict):
+            continue
+        entry = normalise(line)
+        if entry is not None:
+            messages.append(entry)
+
+    total = len(messages)
+    selected = messages
+    if pattern is not None:
+        selected = [m for m in selected if pattern.search("\n\n".join(m[2]))]
+    matched = len(selected)
+    selected = selected[-a.tail:]
+
+    dropped = 0
+    document = digest_document(key, transcript, agent, selected, matched, total, dropped, a.max_bytes)
+    while len(selected) > 1 and len(document.encode()) > a.max_bytes:
+        selected = selected[1:]
+        dropped += 1
+        document = digest_document(key, transcript, agent, selected, matched, total, dropped, a.max_bytes)
+    truncated = False
+    if selected and len(document.encode()) > a.max_bytes:
+        document = digest_truncate(document, a.max_bytes)
+        truncated = True
+
+    digest_path = session_dir(key) / "digest.md"
+    out = {"session": key, "transcript": str(transcript), "agent": agent,
+           "messages": len(selected), "matched": matched, "total": total,
+           "bytes": len(document.encode()), "dropped": dropped, "truncated": truncated}
+    if a.stdout:
+        emit({**out, "path": None, "text": document})
+    digest_write(digest_path, document)
+    emit({**out, "path": str(digest_path)})
+
+
 def cmd_session(a):
     {"start": cmd_session_start, "ls": cmd_session_ls}[a.session_action](a)
 
@@ -1660,6 +1871,16 @@ def main():
     s = sub.add_parser("brief", help="read-only bearings for adopting this session: orchestrator, "
                                      "transcript, notes, workers, unread mail")
     s.add_argument("--closed", action="store_true", help="include closed workers")
+    s = sub.add_parser("digest", help="render this session's orchestrator transcript into a "
+                                     "bounded markdown digest for a handoff to another agent kind")
+    s.add_argument("--tail", type=int, default=200, metavar="N",
+                   help="keep only the last N messages (default: 200)")
+    s.add_argument("--grep", metavar="PAT",
+                   help="keep only messages whose full body matches this regex (case-insensitive)")
+    s.add_argument("--max-bytes", type=int, default=204800, metavar="B",
+                   help="cap the digest at B bytes, dropping oldest messages first (default: 204800)")
+    s.add_argument("--stdout", action="store_true",
+                   help="print the digest text instead of writing digest.md")
     s = sub.add_parser("list", help="list open workers and their herdr state")
     s.add_argument("--all", action="store_true", help="include workers from every session")
     s = sub.add_parser("sweep", help="list this session's open workers, orphaned workers and agent/* worktrees")
@@ -1672,7 +1893,8 @@ def main():
     a = p.parse_args()
     {"launch": cmd_launch, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
      "pause": cmd_pause, "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
-     "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "brief": cmd_brief}[a.cmd](a)
+     "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "brief": cmd_brief,
+     "digest": cmd_digest}[a.cmd](a)
 
 
 if __name__ == "__main__":
