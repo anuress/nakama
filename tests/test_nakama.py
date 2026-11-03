@@ -2388,6 +2388,18 @@ Broken role.
                "rounds": 0, "closed": False, "session": session, "orch_pane": pane}
         (state / f"{name}.json").write_text(json.dumps({**rec, **extra}))
 
+    def named_meta(self, name, pane, about="a run", terminal=None, agent=None, created=None):
+        path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / name / "meta.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        created = time.time() if created is None else created
+        path.write_text(json.dumps({"name": name, "about": about, "owner_pane": pane,
+                                    "owner_terminal": terminal, "created": created,
+                                    "last_seen": created, "adoptions": [], "agent": agent}))
+        return path
+
+    def session_ls(self, *extra):
+        return self.nakama("session", "ls", *extra)
+
     def wait_for_call(self, *prefix):
         for _ in range(500):
             if any(c[:len(prefix)] == list(prefix) for c in self.calls()):
@@ -2880,6 +2892,171 @@ Broken role.
         self.assertEqual(rc, 0, child)
         self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"],
                          {**token, "source": "herdr:pi", "cwd": os.path.realpath(str(self.root))})
+
+    def test_session_ls_counts_workers_per_session(self):
+        self.named_meta("alpha", "w3:p1")
+        self.named_meta("beta", "w3:p2")
+        self.pane_record("b1-a1", "alpha", "w3:p1")
+        self.pane_record("b1-a2", "alpha", "w3:p1", closed=True)
+        self.pane_record("b1-b1", "beta", "w3:p2")
+        self.pane_record("b1-b2", "beta", "w3:p2")
+        self.pane_record("b1-other", "other", "w3:p3")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        rows = {row["name"]: row for row in out["sessions"]}
+        self.assertEqual(rows["alpha"]["workers"], {"open": 1, "total": 2})
+        self.assertEqual(rows["beta"]["workers"], {"open": 2, "total": 2})
+        self.assertNotIn("other", rows)
+
+    def test_session_ls_alive_when_pane_terminal_and_token_match(self):
+        token = {"agent": "pi", "kind": "path", "value": "/abs/live.jsonl"}
+        self.named_meta("cart-rework", "w3:p1", about="cart fix", terminal="term-A",
+                        agent={**token, "source": "herdr:pi", "cwd": "/tmp"})
+        self.set_state(status="idle", terminal_id="term-A", agent_session=token)
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        row = out["sessions"][0]
+        self.assertEqual((row["name"], row["about"]), ("cart-rework", "cart fix"))
+        self.assertEqual((row["pane"], row["alive"], row["pane_reused"]), ("w3:p1", True, False))
+        self.assertEqual(row["kind"], "pi")
+        self.assertEqual(row["resume_with"], "pi --session /abs/live.jsonl")
+        self.assertFalse(row["legacy"])
+
+    def test_session_ls_gone_when_herdr_fails(self):
+        self.named_meta("cart-rework", "w3:p1", terminal="term-A")
+        self.set_state(status="idle", statuses={"w3:p1": None})
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        row = out["sessions"][0]
+        self.assertEqual((row["alive"], row["pane_reused"]), (False, False))
+
+    def test_session_ls_pane_reused_when_agent_session_differs(self):
+        self.named_meta("cart-rework", "w3:p1", terminal="term-A",
+                        agent={"agent": "pi", "kind": "path", "value": "/abs/old.jsonl",
+                               "source": "herdr:pi", "cwd": "/tmp"})
+        self.set_state(status="idle", terminal_id="term-A",
+                       agent_session={"agent": "pi", "kind": "path", "value": "/abs/new.jsonl"})
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        row = out["sessions"][0]
+        self.assertEqual((row["alive"], row["pane_reused"]), (False, True))
+
+    def test_session_ls_pane_reused_when_terminal_differs(self):
+        self.named_meta("cart-rework", "w3:p1", terminal="term-A")
+        self.set_state(status="idle", terminal_id="term-B")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        row = out["sessions"][0]
+        self.assertEqual((row["alive"], row["pane_reused"]), (False, True))
+
+    def test_session_ls_not_alive_when_agent_exited(self):
+        self.named_meta("cart-rework", "w3:p1", terminal="term-A",
+                        agent={"agent": "claude", "kind": "id", "value": "uuid-1",
+                               "source": "herdr:claude", "cwd": "/tmp"})
+        self.set_state(status="idle", terminal_id="term-A")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        row = out["sessions"][0]
+        self.assertEqual((row["alive"], row["pane_reused"]), (False, False))
+
+    def test_session_ls_sorted_by_last_seen_and_reports_notes_and_unread_mail(self):
+        old, new = time.time() - 7200, time.time() - 60
+        old_meta = self.named_meta("older", "w3:p1", created=old)
+        new_meta = self.named_meta("newer", "w3:p2", created=new)
+        self.pane_record("b1-old", "older", "w3:p1")
+        self.pane_record("b1-new", "newer", "w3:p2")
+        notes = new_meta.parent / "notes.md"
+        notes.write_text("- 10:00 decided X\n")
+        for path, when in ((old_meta, old), (new_meta, new), (notes, new),
+                           (self.root / "records" / "b1-old.json", old),
+                           (self.root / "records" / "b1-new.json", new)):
+            os.utime(path, (when, when))
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / "newer"
+        box.mkdir(parents=True)
+        (box / "a.md").write_text("a")
+        (box / "b.md").write_text("b")
+        (box / "c.read").write_text("c")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([row["name"] for row in out["sessions"]], ["newer", "older"])
+        newer, older = out["sessions"]
+        self.assertEqual(newer["inbox_unread"], 2)
+        self.assertEqual(newer["notes"]["bytes"], len("- 10:00 decided X\n"))
+        self.assertGreater(newer["notes"]["age_minutes"], 0)
+        self.assertLess(newer["notes"]["age_minutes"], 3)
+        self.assertEqual(older["notes"], {"bytes": 0, "age_minutes": None})
+        self.assertEqual(older["inbox_unread"], 0)
+        self.assertAlmostEqual(newer["last_seen"], new, places=0)
+        self.assertAlmostEqual(older["last_seen"], old, places=0)
+
+    def test_session_ls_lists_unnamed_sessions_with_open_workers(self):
+        self.pane_record("b1-open", "w3_p9", "w3:p9")
+        self.pane_record("b1-closed", "w3_p8", "w3:p8", closed=True)
+        self.set_state(status="idle")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["sessions"], [])
+        self.assertEqual([(u["session"], u["pane"], u["workers_open"]) for u in out["unnamed"]],
+                         [("w3_p9", "w3:p9", 1)])
+        self.assertGreater(out["unnamed"][0]["last_seen"], 0)
+
+    def test_session_ls_legacy_adds_default_and_pane_id_sessions(self):
+        self.pane_record("b1-default", None, None)
+        self.pane_record("b1-pane", "w3_p9", "w3:p9", closed=True)
+        self.set_state(status="idle")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["sessions"], [])
+        rc, out = self.session_ls("--legacy")
+        self.assertEqual(rc, 0, out)
+        rows = {row["name"]: row for row in out["sessions"]}
+        self.assertEqual(sorted(rows), ["default", "w3_p9"])
+        default = rows["default"]
+        self.assertIsNone(default["about"])
+        self.assertIsNone(default["created"])
+        self.assertTrue(default["legacy"])
+        self.assertEqual(default["cwd"], str(self.root))
+        self.assertEqual(default["workers"], {"open": 1, "total": 1})
+        self.assertEqual(rows["w3_p9"]["workers"], {"open": 0, "total": 1})
+        self.assertEqual(rows["w3_p9"]["pane"], "w3:p9")
+
+    def test_session_ls_is_read_only(self):
+        self.named_meta("cart-rework", "w3:p1")
+        self.pane_record("b1-x", "cart-rework", "w3:p1")
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / "cart-rework"
+        box.mkdir(parents=True)
+        (box / "unread.md").write_text("hi")
+        self.set_state(status="idle")
+        state_dir = Path(self.env["NAKAMA_STATE_DIR"])
+
+        def snapshot():
+            return sorted((str(p.relative_to(state_dir)), p.stat().st_mtime_ns, p.stat().st_size)
+                          for p in state_dir.rglob("*") if p.is_file())
+
+        before = snapshot()
+        self.assertEqual(self.session_ls()[0], 0)
+        self.assertEqual(self.session_ls("--legacy")[0], 0)
+        self.assertEqual(before, snapshot())
+        self.assertTrue((box / "unread.md").is_file())
+
+    def test_session_ls_marks_stale_sessions(self):
+        self.named_meta("live", "w3:p1")
+        self.named_meta("dead", "w3:p2")
+        self.named_meta("busy", "w3:p3")
+        self.pane_record("b1-live", "live", "w3:p1")
+        self.pane_record("b1-busy", "busy", "w3:p3")
+        self.set_state(status="idle", statuses={"w3:p2": None, "w3:p3": None})
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        rows = {row["name"]: row for row in out["sessions"]}
+        self.assertFalse(rows["live"]["stale"])
+        self.assertTrue(rows["dead"]["stale"])
+        self.assertFalse(rows["busy"]["stale"])  # not alive but still has open workers
+
+    def test_session_ls_help_lists_the_command(self):
+        text = self.help_text("session")
+        self.assertIn("ls", text)
+        self.assertIn("list named sessions", text)
 
 
 if __name__ == "__main__":

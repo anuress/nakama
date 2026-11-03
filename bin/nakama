@@ -284,6 +284,23 @@ def session_owned_by_pane(meta, pane, terminal):
                  or meta.get("owner_terminal") == terminal))
 
 
+def session_liveness(meta, agent):
+    if agent is None:
+        return False, False
+    recorded_terminal = meta.get("owner_terminal")
+    terminal = agent_terminal(agent)
+    if recorded_terminal and terminal and recorded_terminal != terminal:
+        return False, True
+    token = meta.get("agent")
+    if isinstance(token, dict):
+        current = agent_session_token(agent)
+        if current is None:
+            return False, False
+        if current["value"] != token.get("value"):
+            return False, True
+    return True, False
+
+
 def current_session():
     named = os.environ.get("NAKAMA_SESSION")
     if named:
@@ -352,24 +369,32 @@ def pane_agent(pane):
     return agent if isinstance(agent, dict) else None
 
 
-def pane_terminal(pane):
-    terminal = (pane_agent(pane) or {}).get("terminal_id")
+def agent_terminal(agent):
+    terminal = (agent or {}).get("terminal_id")
     return terminal if isinstance(terminal, str) and terminal else None
 
 
-def pane_agent_session(pane):
-    session = (pane_agent(pane) or {}).get("agent_session")
+def pane_terminal(pane):
+    return agent_terminal(pane_agent(pane))
+
+
+def agent_session_token(agent):
+    session = (agent or {}).get("agent_session")
     if not isinstance(session, dict):
         return None
-    agent, kind, value = (session.get(key) for key in ("agent", "kind", "value"))
-    if not all(isinstance(part, str) and part for part in (agent, kind, value)):
+    agent_name, kind, value = (session.get(key) for key in ("agent", "kind", "value"))
+    if not all(isinstance(part, str) and part for part in (agent_name, kind, value)):
         return None
     try:
         cwd = os.getcwd()
     except OSError:
         cwd = None
-    return {"agent": agent, "kind": kind, "value": value,
-            "source": f"herdr:{agent}", "cwd": cwd}
+    return {"agent": agent_name, "kind": kind, "value": value,
+            "source": f"herdr:{agent_name}", "cwd": cwd}
+
+
+def pane_agent_session(pane):
+    return agent_session_token(pane_agent(pane))
 
 
 def resume_command(token):
@@ -1269,8 +1294,87 @@ def cmd_session_start(a):
           "resume_with": resume_command(agent)})
 
 
+def cmd_session_ls(a):
+    require_herdr()
+    now = time.time()
+    by_key = {}
+    for rec in records():
+        by_key.setdefault(record_session(rec), []).append(rec)
+
+    def record_time(rec):
+        try:
+            return record_path(rec["name"]).stat().st_mtime
+        except (OSError, KeyError):
+            return None
+
+    def newest(recs):
+        return max(recs, key=lambda rec: record_time(rec) or 0)
+
+    def record_times(recs):
+        return [t for t in (record_time(rec) for rec in recs) if t is not None]
+
+    def notes_info(key):
+        try:
+            st = (session_dir(key) / "notes.md").stat()
+        except OSError:
+            return {"bytes": 0, "age_minutes": None}, None
+        return {"bytes": st.st_size, "age_minutes": round((now - st.st_mtime) / 60, 1)}, st.st_mtime
+
+    def inbox_unread(key):
+        return sum(1 for _ in inbox_dir(ORCH, key).glob("*.md"))
+
+    def worker_counts(recs):
+        return {"open": sum(1 for rec in recs if not rec["closed"]), "total": len(recs)}
+
+    named = sessions_on_disk()
+    rows = []
+    for key, meta in named.items():
+        recs = by_key.get(key, [])
+        notes, notes_time = notes_info(key)
+        times = [(session_dir(key) / "meta.json").stat().st_mtime, notes_time, *record_times(recs)]
+        pane = meta.get("owner_pane")
+        alive, pane_reused = session_liveness(meta, pane_agent(pane))
+        token = meta.get("agent")
+        workers = worker_counts(recs)
+        rows.append({"name": meta.get("name"), "about": meta.get("about"),
+                     "last_seen": max(t for t in times if t is not None),
+                     "created": meta.get("created"), "pane": pane,
+                     "alive": alive, "pane_reused": pane_reused,
+                     "kind": token.get("agent") if isinstance(token, dict) else None,
+                     "resume_with": resume_command(token), "workers": workers, "notes": notes,
+                     "inbox_unread": inbox_unread(key), "legacy": False,
+                     "stale": not alive and workers["open"] == 0})
+
+    unnamed = []
+    for key, recs in by_key.items():
+        workers = worker_counts(recs)
+        if key in named or workers["open"] == 0:
+            continue
+        unnamed.append({"session": key, "pane": newest(recs).get("orch_pane"),
+                        "workers_open": workers["open"], "last_seen": max(record_times(recs))})
+    unnamed.sort(key=lambda row: row["last_seen"], reverse=True)
+
+    if a.legacy:
+        for key, recs in by_key.items():
+            if key in named:
+                continue
+            rec = newest(recs)
+            pane = rec.get("orch_pane")
+            alive = pane is not None and agent_status(pane) is not None
+            workers = worker_counts(recs)
+            notes, _ = notes_info(key)
+            rows.append({"name": key, "about": None, "last_seen": max(record_times(recs)),
+                         "created": None, "pane": pane, "alive": alive, "pane_reused": False,
+                         "kind": None, "resume_with": None, "workers": workers, "notes": notes,
+                         "inbox_unread": inbox_unread(key), "legacy": True,
+                         "stale": not alive and workers["open"] == 0, "cwd": rec.get("worktree")})
+
+    rows.sort(key=lambda row: row["last_seen"], reverse=True)
+    emit({"sessions": rows, "unnamed": unnamed})
+
+
 def cmd_session(a):
-    {"start": cmd_session_start}[a.session_action](a)
+    {"start": cmd_session_start, "ls": cmd_session_ls}[a.session_action](a)
 
 
 def cmd_roles(a):
@@ -1433,6 +1537,11 @@ def main():
                        description="Create a named session bound to this pane; print the export line to use it.")
     st.add_argument("name", help="session name: letters, numbers, underscores or hyphens")
     st.add_argument("--about", help=f"one line describing the session (max {SESSION_ABOUT_MAX} characters)")
+    sl = ss.add_parser("ls", help="list named sessions: description, liveness, resume command, workers, unread mail",
+                       description="List named sessions read-only: description, liveness, resume command, "
+                                   "workers, notes and unread mail.")
+    sl.add_argument("--legacy", action="store_true",
+                    help="also list unnamed pane-id sessions and the default bucket")
     s = sub.add_parser("list", help="list open workers and their herdr state")
     s.add_argument("--all", action="store_true", help="include workers from every session")
     s = sub.add_parser("sweep", help="list this session's open workers, orphaned workers and agent/* worktrees")
