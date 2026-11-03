@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -52,6 +53,8 @@ elif cmd == ["agent", "get"]:
     agent = {"agent_status": status}
     if "terminal_id" in st:
         agent["terminal_id"] = st["terminal_id"]
+    if "agent_session" in st:
+        agent["agent_session"] = st["agent_session"]
     print(json.dumps({"result": {"agent": agent}}))
 elif cmd == ["agent", "prompt"]:
     if args[2] in st.get("prompt_fail", []):
@@ -2748,6 +2751,89 @@ Broken role.
         self.orch_mail("cart-rework", "bound")
         self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]],
                          ["bound"])
+
+    def session_meta_file(self, name="cart-rework"):
+        return Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / name / "meta.json"
+
+    def test_session_start_records_pi_agent_session_resume_token(self):
+        token = {"agent": "pi", "kind": "path", "value": "/abs/session.jsonl"}
+        self.set_state(status="idle", agent_session=token)
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"],
+                         {**token, "source": "herdr:pi", "cwd": os.path.realpath(str(self.root))})
+        self.assertEqual(out["resume_with"], "pi --session /abs/session.jsonl")
+
+    def test_session_start_records_claude_agent_session_resume_token(self):
+        uuid = "11111111-2222-3333-4444-555555555555"
+        self.set_state(status="idle", agent_session={"agent": "claude", "kind": "id", "value": uuid})
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["resume_with"], f"claude --resume {uuid}")
+
+    def test_session_start_unknown_agent_session_has_no_resume_token_command(self):
+        self.set_state(status="idle", agent_session={"agent": "codex", "kind": "id", "value": "x"})
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"]["agent"], "codex")
+        self.assertIsNone(out["resume_with"])
+
+    def test_session_start_resume_token_quotes_paths_with_spaces(self):
+        value = "/tmp/my session/session.jsonl"
+        self.set_state(status="idle", agent_session={"agent": "pi", "kind": "path", "value": value})
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(shlex.split(out["resume_with"]), ["pi", "--session", value])
+
+    def test_launch_refreshes_agent_session_resume_token(self):
+        self.set_state(status="idle")
+        self.assertEqual(self.start_session()[0], 0)
+        self.assertIsNone(json.loads(self.session_meta_file().read_text())["agent"])
+        value = "/abs/later.jsonl"
+        self.set_state(status="idle", agent_session={"agent": "pi", "kind": "path", "value": value})
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi",
+                              env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"]["value"], value)
+
+    def test_launch_keeps_agent_session_resume_token_when_herdr_fails(self):
+        token = {"agent": "pi", "kind": "path", "value": "/abs/kept.jsonl"}
+        self.set_state(status="idle", agent_session=token)
+        self.assertEqual(self.start_session()[0], 0)
+        before = json.loads(self.session_meta_file().read_text())["agent"]
+        self.assertEqual(before, {**token, "source": "herdr:pi", "cwd": os.path.realpath(str(self.root))})
+        self.set_state(status="idle", statuses={"w3:p1": None})
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi",
+                              env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"], before)
+
+    def test_second_launch_does_not_clobber_agent_session_resume_token(self):
+        token = {"agent": "pi", "kind": "path", "value": "/abs/one.jsonl"}
+        self.set_state(status="idle", agent_session=token)
+        self.assertEqual(self.start_session()[0], 0)
+        before = json.loads(self.session_meta_file().read_text())["agent"]
+        self.assertEqual(before, {**token, "source": "herdr:pi", "cwd": os.path.realpath(str(self.root))})
+        self.set_state(status="idle")
+        for _ in range(2):
+            rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi",
+                                  env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+            self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"], before)
+
+    def test_launch_unnamed_session_writes_no_agent_session_meta(self):
+        self.set_state(status="idle", agent_session={"agent": "pi", "kind": "path", "value": "/a.jsonl"})
+        self.launch()
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions").exists())
+
+    def test_session_start_duplicate_reports_resume_token(self):
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self.set_state(status="idle", agent_session={"agent": "claude", "kind": "id", "value": uuid})
+        self.assertEqual(self.start_session()[0], 0)
+        rc, err = self.start_session(about="another about")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["resume_with"], f"claude --resume {uuid}")
 
 
 if __name__ == "__main__":

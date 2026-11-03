@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -335,7 +336,7 @@ def agent_status(name):
     return find_key(data, "agent_status")
 
 
-def pane_terminal(pane):
+def pane_agent(pane):
     try:
         p = run(["herdr", "agent", "get", pane], check=False)
     except OSError:
@@ -346,8 +347,33 @@ def pane_terminal(pane):
         agent = json.loads(p.stdout)["result"]["agent"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
-    terminal = agent.get("terminal_id") if isinstance(agent, dict) else None
+    return agent if isinstance(agent, dict) else None
+
+
+def pane_terminal(pane):
+    terminal = (pane_agent(pane) or {}).get("terminal_id")
     return terminal if isinstance(terminal, str) and terminal else None
+
+
+def pane_agent_session(pane):
+    session = (pane_agent(pane) or {}).get("agent_session")
+    if not isinstance(session, dict):
+        return None
+    agent, kind, value = (session.get(key) for key in ("agent", "kind", "value"))
+    if not all(isinstance(part, str) and part for part in (agent, kind, value)):
+        return None
+    return {"agent": agent, "kind": kind, "value": value,
+            "source": f"herdr:{agent}", "cwd": os.getcwd()}
+
+
+def resume_command(token):
+    if not isinstance(token, dict) or not isinstance(token.get("value"), str):
+        return None
+    if token.get("agent") == "pi":
+        return f"pi --session {shlex.quote(token['value'])}"
+    if token.get("agent") == "claude":
+        return f"claude --resume {shlex.quote(token['value'])}"
+    return None
 
 
 def visible(name):
@@ -581,6 +607,19 @@ def launcher_orch_pane():
     return os.environ.get("HERDR_PANE_ID")
 
 
+def refresh_session_agent(session):
+    """Record the launching pane's resume token without ever clobbering one with None."""
+    key = session_key(session)
+    if session_meta(key) is None:
+        return
+    token = pane_agent_session(launcher_orch_pane())
+    if token is None:
+        return
+    meta = session_meta(key)
+    if meta is not None:
+        save_session_meta({**meta, "agent": token})
+
+
 def launcher_session():
     parent = os.environ.get("NAKAMA_AGENT")
     if parent and record_path(parent).is_file():
@@ -629,6 +668,7 @@ def cmd_launch(a):
         "session": launcher_session(),
     }
     agent_dir(rec).mkdir(parents=True, exist_ok=True)
+    refresh_session_agent(rec["session"])
     started = start_worker(rec, meta, a.layout, a.direction)
     out = {"name": name, "pane": rec["pane"], "worktree": worktree, "branch": branch, "dir": str(agent_dir(rec))}
     if started.returncode != 0:
@@ -1129,11 +1169,13 @@ def cmd_session_start(a):
             owner = existing.get("owner_pane")
             emit({"error": f"session {key} already exists", "session": key,
                   "about": existing.get("about"), "pane": owner,
-                  "pane_alive": owner is not None and agent_status(owner) is not None}, 2)
+                  "pane_alive": owner is not None and agent_status(owner) is not None,
+                  "resume_with": resume_command(existing.get("agent"))}, 2)
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         emit({"error": "no HERDR_PANE_ID: session start must run inside a herdr pane"}, 2)
     terminal = pane_terminal(pane)
+    agent = pane_agent_session(pane)
     for key, meta in sessions_on_disk().items():
         if session_owned_by_pane(meta, pane, terminal):
             emit({"error": f"this pane already owns session {key} ({meta.get('about')}); "
@@ -1172,7 +1214,7 @@ def cmd_session_start(a):
             now = time.time()
             save_session_meta({"name": a.name, "about": about, "owner_pane": pane,
                                "owner_terminal": terminal, "created": now, "last_seen": now,
-                               "adoptions": [], "agent": None})
+                               "adoptions": [], "agent": agent})
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         # Naming a run after it started must not hide its own workers from it.
@@ -1217,7 +1259,8 @@ def cmd_session_start(a):
     finally:
         os.close(lock_fd)
     emit({"name": a.name, "about": about, "dir": str(session_dir(a.name)),
-          "export": f"export NAKAMA_SESSION={a.name}", "rebound": rebound})
+          "export": f"export NAKAMA_SESSION={a.name}", "rebound": rebound,
+          "resume_with": resume_command(agent)})
 
 
 def cmd_session(a):
