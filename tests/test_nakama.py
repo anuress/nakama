@@ -2690,6 +2690,23 @@ Broken role.
         messages = self.nakama("inbox", "--peek")[1]["messages"]
         self.assertEqual([message["text"] for message in messages], ["bound"])
 
+    def test_session_resolution_refuses_ambiguous_pane_owner(self):
+        # A recycled pane left two sessions claiming it, and the terminal lookup cannot tell them
+        # apart. Binding either one would give this run another session's workers.
+        state = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions"
+        for name in ("alpha", "beta"):
+            meta = state / name / "meta.json"
+            meta.parent.mkdir(parents=True, exist_ok=True)
+            meta.write_text(json.dumps({"name": name, "about": name, "owner_pane": self.env["HERDR_PANE_ID"],
+                                        "owner_terminal": "term-A", "created": 1, "last_seen": 1,
+                                        "adoptions": [], "agent": None}))
+        self.orch_mail("alpha", "stale-a")
+        self.orch_mail("beta", "stale-b")
+        self.orch_mail("w3_p1", "pane")
+        self.set_state(status=None)  # herdr cannot report a terminal id
+        messages = [m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]]
+        self.assertEqual(messages, ["pane"])
+
     def test_session_resolution_falls_back_to_pane_id(self):
         self.orch_mail("w3_p1", "pane")
         self.orch_mail("cart-rework", "other")

@@ -291,6 +291,7 @@ def current_session():
     if pane:
         terminal = None
         terminal_checked = False
+        owners = []
         for key, meta in sessions_on_disk().items():
             if meta.get("owner_pane") != pane:
                 continue
@@ -298,7 +299,11 @@ def current_session():
                 terminal = pane_terminal(pane)
                 terminal_checked = True
             if session_owned_by_pane(meta, pane, terminal):
-                return key
+                owners.append(key)
+        # Ambiguity means a recycled pane or a failed terminal lookup: binding the first match in
+        # glob order would hand this run another session's workers, so stay unnamed instead.
+        if len(owners) == 1:
+            return owners[0]
     return pane or "default"
 
 
@@ -1185,14 +1190,15 @@ def cmd_session_start(a):
         for name, previous_session in reversed(rebound_records):
             try:
                 patch_record(name, session=previous_session)
-            except Exception as rollback_error:
+            except BaseException as rollback_error:
+                # BaseException too: patch_record's load() emits (SystemExit) if a record vanished.
                 rollback_errors.append((name, rollback_error))
         if rollback_errors:
+            # JSON contract: this failure needs manual recovery, so no traceback.
             details = "; ".join(f"{name}: {error}" for name, error in rollback_errors)
-            raise RuntimeError(
-                f"session start failed ({start_error}); rollback incomplete ({details}); "
-                f"retained {session_dir(a.name)} and pane claim {claim}"
-            ) from rollback_errors[0][1]
+            emit({"error": f"session start failed ({start_error}); rollback incomplete ({details}); "
+                            f"retained {session_dir(a.name)} and pane claim {claim}",
+                  "session": a.name, "dir": str(session_dir(a.name)), "claim": str(claim)}, 1)
         if created or ours:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
