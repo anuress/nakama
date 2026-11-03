@@ -1,3 +1,5 @@
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -8,6 +10,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 NAKAMA = REPO / "bin" / "nakama"
@@ -27,21 +31,35 @@ if args == ["--version"]:
 elif cmd == ["pane", "split"]:
     print(json.dumps({"result": {"pane": {"pane_id": "w1:p9"}}}))
 elif cmd == ["tab", "create"]:
+    barrier = os.environ.get("FAKE_TAB_BARRIER")
+    if barrier:
+        while not os.path.exists(barrier):
+            time.sleep(0.01)
     print(json.dumps({"result": {"tab": {"tab_id": "w1:t5"}, "root_pane": {"pane_id": "w1:p8"}}}))
 elif cmd == ["agent", "list"]:
     print(json.dumps({"result": {"agents": st.get("agents", [])}}))
 elif cmd == ["agent", "start"]:
     sys.exit(st.get("start_rc", 0))
 elif cmd == ["agent", "get"]:
-    time.sleep(float(os.environ.get("FAKE_GET_SLEEP") or 0))  # lets a test act while `wait` is mid-loop
+    barrier = os.environ.get("FAKE_GET_BARRIER")
+    if barrier:
+        while not os.path.exists(barrier):
+            time.sleep(0.01)
     name = args[2]
     status = st["statuses"].get(name) if name in st.get("statuses", {}) else st.get("status")
     if status is None:
         sys.exit(1)
-    print(json.dumps({"result": {"agent": {"agent_status": status}}}))
+    agent = {"agent_status": status}
+    if "terminal_id" in st:
+        agent["terminal_id"] = st["terminal_id"]
+    print(json.dumps({"result": {"agent": agent}}))
 elif cmd == ["agent", "prompt"]:
     if args[2] in st.get("prompt_fail", []):
         sys.exit(1)
+    barrier = os.environ.get("FAKE_PROMPT_BARRIER")
+    if barrier:
+        while not os.path.exists(barrier):
+            time.sleep(0.01)
     write = st.get("write_on_prompt")
     if write:
         time.sleep(0.02)
@@ -2375,6 +2393,7 @@ Broken role.
         self.fail(f"no herdr call {prefix}")
 
     def test_session_start_creates_bound_meta_and_export(self):
+        self.set_state(status="idle", terminal_id="term-A")
         rc, out = self.start_session()
         self.assertEqual(rc, 0, out)
         self.assertEqual(out["name"], "cart-rework")
@@ -2384,12 +2403,21 @@ Broken role.
         self.assertEqual(out["dir"], str(path.parent))
         meta = json.loads(path.read_text())
         self.assertEqual(sorted(meta),
-                         ["about", "adoptions", "agent", "created", "last_seen", "name", "owner_pane"])
+                         ["about", "adoptions", "agent", "created", "last_seen", "name", "owner_pane",
+                          "owner_terminal"])
         self.assertEqual((meta["name"], meta["about"]), ("cart-rework", "shopee cart group lazy-row fix"))
         self.assertEqual(meta["owner_pane"], self.env["HERDR_PANE_ID"])
+        self.assertEqual(meta["owner_terminal"], "term-A")
         self.assertEqual((meta["adoptions"], meta["agent"]), ([], None))
         self.assertAlmostEqual(meta["created"], meta["last_seen"])
         self.assertAlmostEqual(meta["created"], time.time(), delta=60)
+
+    def test_session_start_tolerates_unavailable_terminal_identity(self):
+        self.set_state(status=None)
+        rc, out = self.start_session()
+        self.assertEqual(rc, 0, out)
+        path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework" / "meta.json"
+        self.assertIsNone(json.loads(path.read_text())["owner_terminal"])
 
     def test_session_start_rejects_name_needing_sanitizing(self):
         rc, err = self.start_session("pr-6506/review")
@@ -2453,11 +2481,22 @@ Broken role.
         self.assertEqual(self.record("b1-other")["session"], "w9_p9")
 
     def test_session_start_rejects_second_session_in_one_pane(self):
+        self.set_state(status="idle", terminal_id="term-A")
         self.assertEqual(self.start_session("alpha", "a")[0], 0)
         rc, err = self.start_session("beta", "b")
         self.assertEqual(rc, 2, err)
         self.assertEqual((err["session"], err["about"]), ("alpha", "a"))
         self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "beta").exists())
+
+    def test_session_start_reclaims_stale_pane_claim_after_session_deleted(self):
+        self.set_state(status="idle", terminal_id="term-A")
+        self.assertEqual(self.start_session("alpha", "first")[0], 0)
+        sessions = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions"
+        shutil.rmtree(sessions / "alpha")
+        rc, out = self.start_session("beta", "second")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["name"], "beta")
+        self.assertEqual((sessions / ".by-pane" / "w3_p1").read_text(), "beta")
 
     def test_session_start_rejects_pane_key_name(self):
         rc, err = self.start_session("w3_p1")
@@ -2475,19 +2514,84 @@ Broken role.
         self.pane_record("b1-x", "w3_p1", "w3:p1", prompted_at=time.time(), nudged_at=None,
                          budget_min=45, extended_min=0, mode="write")
         self.set_state(status="working", screen="SCREEN one")
+        barrier = self.root / "release-wait"
         proc = subprocess.Popen([sys.executable, str(NAKAMA), "wait", "b1-x", "--timeout", "0.5"],
-                                env={**self.env, "FAKE_GET_SLEEP": "1.5"}, cwd=self.root,
+                                env={**self.env, "FAKE_GET_BARRIER": str(barrier)}, cwd=self.root,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            self.wait_for_call("herdr", "agent", "get")  # `wait` has loaded the record
+            self.wait_for_call("herdr", "agent", "get", "b1-x")
+            self.assertIsNone(proc.poll())
             rc, out = self.start_session("named")
             self.assertEqual(rc, 0, out)
-            proc.communicate(timeout=30)
+            self.assertEqual(out["rebound"], 1)
+            self.assertEqual(self.record("b1-x")["session"], "named")
+            self.assertIsNone(proc.poll())
         finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.communicate()
+            barrier.touch()
+            stdout, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, (stdout, stderr))
         self.assertEqual(self.record("b1-x")["session"], "named")
+
+    def test_prompt_save_does_not_clobber_a_concurrent_session_rebind(self):
+        self.pane_record("b1-x", "w3_p1", "w3:p1")
+        task = self.root / ".agent" / "b1-x" / "task.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("## Goal\nwork\n")
+        self.set_state(status="idle", terminal_id="term-A")
+        barrier = self.root / "release-prompt"
+        proc = subprocess.Popen([sys.executable, str(NAKAMA), "prompt", "b1-x", "task.md"],
+                                env={**self.env, "FAKE_PROMPT_BARRIER": str(barrier)}, cwd=self.root,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.wait_for_call("herdr", "agent", "prompt", "b1-x")
+            self.assertIsNone(proc.poll())
+            rc, out = self.start_session("named")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out["rebound"], 1)
+            self.assertEqual(self.record("b1-x")["session"], "named")
+        finally:
+            barrier.touch()
+            stdout, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, (stdout, stderr))
+        self.assertEqual(self.record("b1-x")["session"], "named")
+
+    def test_resume_writes_only_owned_fields_after_concurrent_session_rebind(self):
+        self.pane_record("b1-x", "w3_p1", "w3:p1", mode="write", tab=None, layout="tab",
+                         direction="right", branch=None, prompted_at=None, git_before=None, receipt=None,
+                         nudged_at=None, screen_sig=None, screen_changed_at=None, paused=True,
+                         paused_forced=True, pause_sent_at=time.time())
+        record = self.record("b1-x")
+        record["pane"] = "w1:p9"
+        (Path(self.env["NAKAMA_STATE_DIR"]) / "b1-x.json").write_text(json.dumps(record))
+        task = self.root / ".agent" / "b1-x" / "task.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("## Goal\nwork\n")
+        self.set_state(status="idle", statuses={"b1-x": None}, terminal_id="term-A")
+        tab_barrier = self.root / "release-tab"
+        prompt_barrier = self.root / "release-resume-prompt"
+        proc = subprocess.Popen([sys.executable, str(NAKAMA), "resume", "b1-x"],
+                                env={**self.env, "FAKE_TAB_BARRIER": str(tab_barrier),
+                                     "FAKE_PROMPT_BARRIER": str(prompt_barrier)}, cwd=self.root,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.wait_for_call("herdr", "tab", "create")
+            self.assertIsNone(proc.poll())
+            rc, out = self.start_session("named")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out["rebound"], 1)
+            self.assertEqual(self.record("b1-x")["session"], "named")
+            tab_barrier.touch()
+            self.wait_for_call("herdr", "agent", "prompt", "b1-x")
+            self.assertIsNone(proc.poll())
+            self.assertEqual(self.record("b1-x")["session"], "named")
+        finally:
+            tab_barrier.touch()
+            prompt_barrier.touch()
+            stdout, stderr = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, (stdout, stderr))
+        self.assertEqual(self.record("b1-x")["session"], "named")
+        self.assertFalse(self.record("b1-x")["paused"])
+        self.assertFalse(self.record("b1-x")["paused_forced"])
 
     def test_session_start_rebind_ignores_another_sessions_worker(self):
         self.pane_record("b1-other", "other-session", "w3:p1")
@@ -2505,6 +2609,35 @@ Broken role.
         self.assertFalse((state / "sessions" / "named").exists())
         self.assertFalse((state / "sessions" / ".by-pane" / "w3_p1").exists())
 
+    def test_session_start_rolls_back_all_rebinds_when_a_patch_fails(self):
+        self.set_state(status="idle", terminal_id="term-A")
+        self.pane_record("b1-first", "w3_p1", "w3:p1")
+        self.pane_record("b1-second", "w3_p1", "w3:p1")
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        loader = importlib.machinery.SourceFileLoader("nakama_under_test", str(NAKAMA))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        nakama = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, self.env):
+            loader.exec_module(nakama)
+            nakama.STATE_DIR = state
+            original_patch_record = nakama.patch_record
+            patches = []
+
+            def fail_second(name, **changes):
+                patches.append((name, changes.get("session")))
+                if name == "b1-second" and changes.get("session") == "named":
+                    raise OSError("injected patch failure")
+                return original_patch_record(name, **changes)
+            with mock.patch.object(nakama, "patch_record", fail_second):
+                with self.assertRaisesRegex(OSError, "injected patch failure"):
+                    nakama.cmd_session_start(SimpleNamespace(name="named", about="failure test"))
+        self.assertEqual(patches, [("b1-first", "named"), ("b1-second", "named"),
+                                   ("b1-second", "w3_p1"), ("b1-first", "w3_p1")])
+        self.assertEqual(self.record("b1-first")["session"], "w3_p1")
+        self.assertEqual(self.record("b1-second")["session"], "w3_p1")
+        self.assertFalse((state / "sessions" / "named").exists())
+        self.assertFalse((state / "sessions" / ".by-pane" / "w3_p1").exists())
+
     def test_session_start_reports_incomplete_existing_directory(self):
         ghost = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "ghost"
         ghost.mkdir(parents=True)
@@ -2514,19 +2647,48 @@ Broken role.
         self.assertIn(str(ghost), err["error"])
 
     def test_session_start_second_concurrent_claim_is_refused(self):
-        claim = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / ".by-pane" / "w3_p1"
+        self.set_state(status="idle", terminal_id="term-A")
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        alpha = state / "sessions" / "alpha"
+        alpha.mkdir(parents=True)
+        (alpha / "meta.json").write_text(json.dumps({
+            "name": "alpha", "about": "a", "owner_pane": self.env["HERDR_PANE_ID"],
+            "owner_terminal": "term-A"}))
+        claim = state / "sessions" / ".by-pane" / "w3_p1"
         claim.parent.mkdir(parents=True)
         claim.write_text("alpha")
         rc, err = self.start_session("beta")
         self.assertEqual(rc, 2, err)
         self.assertEqual(err["session"], "alpha")
-        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "beta").exists())
+        self.assertEqual(err["about"], "a")
+        self.assertFalse((state / "sessions" / "beta").exists())
 
     def test_session_resolution_uses_pane_bound_session(self):
         self.assertEqual(self.start_session()[0], 0)
         self.orch_mail("cart-rework", "bound")
         self.orch_mail("w3_p1", "pane")
         self.assertEqual([m["text"] for m in self.nakama("inbox", "--peek")[1]["messages"]], ["bound"])
+
+    def test_session_resolution_uses_terminal_identity_when_pane_recycled(self):
+        self.set_state(status="idle", terminal_id="term-A")
+        self.assertEqual(self.start_session()[0], 0)
+        self.orch_mail("cart-rework", "bound")
+        self.orch_mail("w3_p1", "pane")
+        self.set_state(status="idle", terminal_id="term-B")
+        messages = self.nakama("inbox", "--peek")[1]["messages"]
+        self.assertEqual([message["text"] for message in messages], ["pane"])
+        rc, out = self.start_session("beta", "second terminal")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["rebound"], 0)
+
+    def test_session_resolution_falls_back_when_terminal_lookup_fails(self):
+        self.set_state(status="idle", terminal_id="term-A")
+        self.assertEqual(self.start_session()[0], 0)
+        self.orch_mail("cart-rework", "bound")
+        self.orch_mail("w3_p1", "pane")
+        self.set_state(status=None)
+        messages = self.nakama("inbox", "--peek")[1]["messages"]
+        self.assertEqual([message["text"] for message in messages], ["bound"])
 
     def test_session_resolution_falls_back_to_pane_id(self):
         self.orch_mail("w3_p1", "pane")

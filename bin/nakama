@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """nakama: run pi / Claude Code workers in herdr panes. Usage: see ../skills/nakama/SKILL.md."""
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -276,14 +277,27 @@ def sessions_on_disk():
     return {key: meta for key, meta in metas if meta is not None}
 
 
+def session_owned_by_pane(meta, pane, terminal):
+    return (meta is not None and meta.get("owner_pane") == pane
+            and (meta.get("owner_terminal") is None or terminal is None
+                 or meta.get("owner_terminal") == terminal))
+
+
 def current_session():
     named = os.environ.get("NAKAMA_SESSION")
     if named:
         return named
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
+        terminal = None
+        terminal_checked = False
         for key, meta in sessions_on_disk().items():
-            if meta.get("owner_pane") == pane:
+            if meta.get("owner_pane") != pane:
+                continue
+            if meta.get("owner_terminal") is not None and not terminal_checked:
+                terminal = pane_terminal(pane)
+                terminal_checked = True
+            if session_owned_by_pane(meta, pane, terminal):
                 return key
     return pane or "default"
 
@@ -314,6 +328,21 @@ def agent_status(name):
         return None
     data = parse_external_json(p.stdout, "herdr agent get", {"agent_status": str})
     return find_key(data, "agent_status")
+
+
+def pane_terminal(pane):
+    try:
+        p = run(["herdr", "agent", "get", pane], check=False)
+    except OSError:
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        agent = json.loads(p.stdout)["result"]["agent"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    terminal = agent.get("terminal_id") if isinstance(agent, dict) else None
+    return terminal if isinstance(terminal, str) and terminal else None
 
 
 def visible(name):
@@ -507,7 +536,7 @@ def stop_worker(rec):
         Path(lock.stdout.strip()).unlink(missing_ok=True)
 
 
-def start_worker(rec, meta, layout="tab", direction="right"):
+def start_worker(rec, meta, layout="tab", direction="right", patch_existing=False):
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
     # Target the caller's own workspace/pane: herdr's defaults follow focus, which may be elsewhere.
     if layout == "tab":
@@ -529,7 +558,12 @@ def start_worker(rec, meta, layout="tab", direction="right"):
     rec["tab"] = find_key(created, "tab_id") if layout == "tab" else None
     # The GH_CONFIG_DIR worker_env made: teardown removes exactly this one and nothing else.
     rec["gh_config_dir"] = next(v.split("=", 1)[1] for v in surface if v.startswith("GH_CONFIG_DIR="))
-    save(rec)
+    if patch_existing:
+        patch_record(rec["name"], pane=rec["pane"], tab=rec["tab"], gh_config_dir=rec["gh_config_dir"],
+                     closed=rec["closed"], prompted_at=rec["prompted_at"], nudged_at=rec["nudged_at"],
+                     screen_sig=rec["screen_sig"], screen_changed_at=rec["screen_changed_at"])
+    else:
+        save(rec)
     return run(["herdr", "agent", "start", rec["name"], "--kind", rec["kind"], "--pane", rec["pane"],
                 "--timeout", "60000", "--", *agent_args(rec, meta)], check=False)
 
@@ -624,7 +658,7 @@ def cmd_resume(a):
         # must still say it is paused, or a retry of `resume` loses the forced-pause warning.
         rec.update(closed=False, prompted_at=None, nudged_at=None,
                    screen_sig=None, screen_changed_at=None)
-        started = start_worker(rec, meta, layout, rec.get("direction", "right"))
+        started = start_worker(rec, meta, layout, rec.get("direction", "right"), patch_existing=True)
         if started.returncode != 0:
             out = {"name": rec["name"], "pane": rec["pane"], "worktree": rec["worktree"]}
             emit({**out, "status": "blocked", "stderr": started.stderr.strip()[-300:], "screen": screen(rec["name"])})
@@ -654,10 +688,9 @@ def cmd_resume(a):
     prompted = run(["herdr", "agent", "prompt", rec["name"], message], check=False)
     if prompted.returncode != 0:
         emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
-    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
-               paused=False, paused_forced=False, pause_sent_at=None,
-               screen_sig=None, screen_changed_at=None)
-    save(rec)
+    patch_record(rec["name"], prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
+                 paused=False, paused_forced=False, pause_sent_at=None,
+                 screen_sig=None, screen_changed_at=None)
     emit({"name": rec["name"], "status": "fresh_primed", "pane": rec["pane"],
           "worktree": rec["worktree"], "rounds": rec["rounds"]})
 
@@ -682,10 +715,13 @@ def cmd_prompt(a):
         message += progress_note(rec, dirty=False)
     run(["herdr", "agent", "prompt", rec["name"], message])
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
-    rec.update(prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
-               extended_min=0, spent_min=0,
-               screen_sig=None, screen_changed_at=None)
-    save(rec)
+    changes = {
+        "prompted_at": prompted_at, "git_before": before, "receipt": None, "nudged_at": None,
+        "extended_min": 0, "spent_min": 0, "screen_sig": None, "screen_changed_at": None,
+    }
+    if task.name.startswith("fix-") and not a.answer:
+        changes["rounds"] = rec["rounds"]
+    patch_record(rec["name"], **changes)
     emit({"name": rec["name"], "status": "prompted", "file": str(rel), "rounds": rec["rounds"]})
 
 
@@ -909,8 +945,7 @@ def cmd_pause(a):
             run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
             close_worker_surface(rec)
             # Bank the time spent, so relaunching it does not hand out a fresh budget.
-            rec.update(closed=True, spent_min=spent_minutes(rec))
-            save(rec)
+            patch_record(rec["name"], closed=True, spent_min=spent_minutes(rec))
             stopped = True
             results[rec["name"]] = {"name": rec["name"], "status": "stopped", "reason": "read_only"}
             continue
@@ -933,8 +968,7 @@ def cmd_pause(a):
             "uncommitted files and their state. Then stop.\n")
         sent_at = time.time()
         sent = send_one(ORCH, rec["name"], "info", pause_file, None)
-        rec["pause_sent_at"] = sent_at
-        save(rec)
+        patch_record(rec["name"], pause_sent_at=sent_at)
         if sent.get("pushed"):
             pending.append((rec, sent_at))
         else:
@@ -970,8 +1004,7 @@ def cmd_pause(a):
         dirty = worktree_dirty(rec)
         if result_status and result_status not in ("partial", "needs_input") and not dirty:
             close_worker_surface(rec)
-            rec.update(closed=True, paused=False, paused_forced=False)
-            save(rec)
+            patch_record(rec["name"], closed=True, paused=False, paused_forced=False)
             results[rec["name"]] = {
                 "name": rec["name"], "status": "finished", "result_status": result_status,
                 "steps": steps_info(rec), "dirty": dirty,
@@ -982,9 +1015,8 @@ def cmd_pause(a):
         else:
             stop_worker(rec)
         # Resume re-arms prompted_at, so the time already spent is banked here or it is lost.
-        rec.update(closed=True, paused=True, paused_forced=not was_noted,
-                   spent_min=spent_minutes(rec))
-        save(rec)
+        patch_record(rec["name"], closed=True, paused=True, paused_forced=not was_noted,
+                     spent_min=spent_minutes(rec))
         results[rec["name"]] = {
             "name": rec["name"], "status": "paused" if was_noted else "paused_forced",
             "steps": steps_info(rec), "dirty": dirty,
@@ -1020,10 +1052,10 @@ def cmd_teardown(a):
                 reason = (result.stderr + result.stdout)[-300:].strip()
         else:
             reason = "no worktree owned by this agent"
+    changes = {"closed": True}
     if removed:
-        rec.update(paused=False, paused_forced=False, pause_sent_at=None)
-    rec["closed"] = True
-    save(rec)
+        changes.update(paused=False, paused_forced=False, pause_sent_at=None)
+    patch_record(rec["name"], **changes)
     out = {"name": rec["name"], "status": "closed", "worktree_removed": removed}
     if reason is not None:
         out["reason"] = reason
@@ -1096,46 +1128,88 @@ def cmd_session_start(a):
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         emit({"error": "no HERDR_PANE_ID: session start must run inside a herdr pane"}, 2)
+    terminal = pane_terminal(pane)
+    for key, meta in sessions_on_disk().items():
+        if session_owned_by_pane(meta, pane, terminal):
+            emit({"error": f"this pane already owns session {key} ({meta.get('about')}); "
+                  "use it or start in another pane",
+                  "session": key, "about": meta.get("about"), "pane": pane}, 2)
     claims = STATE_DIR / "sessions" / ".by-pane"
     claims.mkdir(parents=True, exist_ok=True)
     claim = claims / session_key(pane)
+    lock_fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
     ours = created = False
+    rebound_records = []
     try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            # Exclusive per-pane claim: two starts racing in one pane cannot both pass the owner check.
-            os.close(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            try:
+                owned = claim.read_bytes().decode("ascii", errors="replace").strip()
+            except FileNotFoundError:
+                owned = ""
+            meta = session_meta(owned) if SESSION_NAME_RE.fullmatch(owned) else None
+            if session_owned_by_pane(meta, pane, terminal):
+                emit({"error": f"this pane already owns session {owned}; use it or start in another pane",
+                      "session": owned, "about": meta.get("about"), "pane": pane}, 2)
+            owner_bytes = a.name.encode("ascii")
+            fd = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             ours = True
-        except FileExistsError:
-            owned = claim.read_text().strip()
-            emit({"error": f"this pane already owns session {owned}", "session": owned,
-                  "about": (session_meta(owned) or {}).get("about"), "pane": pane}, 2)
-        claim.write_text(a.name)
-        for key, meta in sessions_on_disk().items():
-            if meta.get("owner_pane") == pane:
-                emit({"error": f"this pane already owns session {key} ({meta.get('about')})",
-                      "session": key, "about": meta.get("about"), "pane": pane}, 2)
-        try:
-            session_dir(a.name).mkdir()
-            created = True
-        except FileExistsError:
-            emit({"error": f"session {a.name} already exists"}, 2)
-        now = time.time()
-        save_session_meta({"name": a.name, "about": about, "owner_pane": pane,
-                           "created": now, "last_seen": now, "adoptions": [], "agent": None})
+            try:
+                if os.write(fd, owner_bytes) != len(owner_bytes):
+                    raise OSError("short write to pane claim")
+            finally:
+                os.close(fd)
+            try:
+                session_dir(a.name).mkdir()
+                created = True
+            except FileExistsError:
+                emit({"error": f"session {a.name} already exists"}, 2)
+            now = time.time()
+            save_session_meta({"name": a.name, "about": about, "owner_pane": pane,
+                               "owner_terminal": terminal, "created": now, "last_seen": now,
+                               "adoptions": [], "agent": None})
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
         # Naming a run after it started must not hide its own workers from it.
-        # shortcut: a mid-loop failure leaves some records rebound and the session dir in place;
-        # recover by removing the session dir and re-running start.
+        # shortcut: failed starts are cleaned up only after every rebind restores its prior session.
+        # Incomplete rollback retains its session and claim. Case variants can race across panes
+        # on case-sensitive filesystems until Task 7 canonicalizes names in session rm/rename.
         rebound = 0
         for rec in open_records():
             if record_session(rec) == session_key(pane):
+                rebound_records.append((rec["name"], rec.get("session")))
                 patch_record(rec["name"], session=a.name)
                 rebound += 1
-    except BaseException:
-        if created:
-            shutil.rmtree(session_dir(a.name), ignore_errors=True)
-        if ours:
-            claim.unlink(missing_ok=True)
+    except BaseException as start_error:
+        rollback_errors = []
+        for name, previous_session in reversed(rebound_records):
+            try:
+                patch_record(name, session=previous_session)
+            except Exception as rollback_error:
+                rollback_errors.append((name, rollback_error))
+        if rollback_errors:
+            details = "; ".join(f"{name}: {error}" for name, error in rollback_errors)
+            raise RuntimeError(
+                f"session start failed ({start_error}); rollback incomplete ({details}); "
+                f"retained {session_dir(a.name)} and pane claim {claim}"
+            ) from rollback_errors[0][1]
+        if created or ours:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                if created:
+                    shutil.rmtree(session_dir(a.name), ignore_errors=True)
+                if ours:
+                    try:
+                        owned = claim.read_bytes().decode("ascii", errors="replace").strip()
+                    except FileNotFoundError:
+                        owned = None
+                    if owned == a.name:
+                        claim.unlink(missing_ok=True)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         raise
+    finally:
+        os.close(lock_fd)
     emit({"name": a.name, "about": about, "dir": str(session_dir(a.name)),
           "export": f"export NAKAMA_SESSION={a.name}", "rebound": rebound})
 
