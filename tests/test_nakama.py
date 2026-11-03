@@ -2376,10 +2376,10 @@ Broken role.
     def start_session(self, name="cart-rework", about="shopee cart group lazy-row fix", env=None):
         return self.nakama("session", "start", name, "--about", about, env=env)
 
-    def orch_mail(self, session, text="hello"):
+    def orch_mail(self, session, text="hello", kind="info", sender="b1-x"):
         box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / session
         box.mkdir(parents=True, exist_ok=True)
-        (box / f"{time.time_ns()}.b1-x.info.md").write_text(text)
+        (box / f"{time.time_ns()}.{sender}.{kind}.md").write_text(text)
 
     def pane_record(self, name, session, pane, **extra):
         state = Path(self.env["NAKAMA_STATE_DIR"])
@@ -3078,6 +3078,190 @@ Broken role.
         text = self.help_text("session")
         self.assertIn("ls", text)
         self.assertIn("list named sessions", text)
+
+
+    def brief(self, *extra, env=None):
+        return self.nakama("brief", *extra, env=env)
+
+    def brief_row(self, name, *extra, env=None):
+        rc, out = self.brief(*extra, env=env)
+        self.assertEqual(rc, 0, out)
+        return next(row for row in out["workers"] if row["name"] == name)
+
+    def test_brief_maps_worker_state_and_result(self):
+        self.set_state(status="idle")
+        out = self.launch()
+        self.task(out)
+        self.assertEqual(self.nakama("prompt", out["name"], "task.md")[0], 0)
+        rec = self.record(out["name"])
+        result = Path(self.result(out))
+        result.write_text("Status: succeeded\nNext: review\n")
+        stamp = rec["prompted_at"] + 5
+        os.utime(result, (stamp, stamp))
+        unprompted = self.launch()
+        rc, brief = self.brief()
+        self.assertEqual(rc, 0, brief)
+        rows = {row["name"]: row for row in brief["workers"]}
+        row = rows[out["name"]]
+        self.assertEqual(row["result"], {"status": "succeeded", "next": "review", "steps": None})
+        self.assertEqual(row["state"], "idle")
+        self.assertEqual((row["rounds"], row["paused"], row["session"]), (0, False, "w3_p1"))
+        self.assertIsNone(rows[unprompted["name"]]["result"])
+
+    def test_brief_counts_blocker_mail_without_consuming_it(self):
+        out = self.launch()
+        self.orch_mail("w3_p1", "blocked on you", kind="blocker")
+        box = Path(out["dir"], "inbox")
+        box.mkdir(parents=True)
+        mail = box / f"{time.time_ns()}.orch.info.md"
+        mail.write_text("look")
+        for _ in range(2):
+            self.assertEqual(self.brief_row(out["name"])["mail"], {"unread": 1, "kinds": ["info"]})
+            self.assertEqual(self.brief()[1]["unread_orchestrator_mail"]["count"], 1)
+        self.assertEqual(list(box.glob("*.md")), [mail])
+        self.assertTrue(all(p.suffix == ".md" for p in self.orch_box("w3_p1").glob("*")))
+
+    def test_brief_reports_worktree_dirty_then_clean(self):
+        wt = self.root / "dirty-wt"
+        wt.mkdir()
+        self.wgit(wt, "init", "-q")
+        self.wgit(wt, "commit", "-q", "--allow-empty", "-m", "root")
+        self.pane_record("b1-dirty", "w3:p1", "w3:p1", worktree=str(wt))
+        self.set_state(status="idle")
+        Path(wt, "scratch.txt").write_text("x")
+        self.assertTrue(self.brief_row("b1-dirty")["worktree_dirty"])
+        Path(wt, "scratch.txt").unlink()
+        self.assertFalse(self.brief_row("b1-dirty")["worktree_dirty"])
+        shutil.rmtree(wt)
+        self.assertFalse(self.brief_row("b1-dirty")["worktree_dirty"])
+
+    def test_brief_cross_kind_for_claude_token_in_pi_pane(self):
+        token = {"agent": "claude", "kind": "id", "value": "5f0c-uuid",
+                 "source": "herdr:claude", "cwd": "/x"}
+        self.named_meta("cart-rework", "w3:p1", agent=token)
+        self.set_state(status="idle",
+                       agent_session={"agent": "pi", "kind": "path", "value": "/tmp/s.jsonl"})
+        rc, brief = self.brief()
+        self.assertEqual(rc, 0, brief)
+        self.assertEqual(brief["session"]["name"], "cart-rework")
+        self.assertEqual(brief["transcript"], {"agent": "claude", "kind": "id", "value": "5f0c-uuid",
+                                               "resume_with": "claude --resume 5f0c-uuid",
+                                               "cross_kind": True})
+
+    def test_brief_warns_unnamed_session(self):
+        rc, brief = self.brief()
+        self.assertEqual(rc, 0, brief)
+        self.assertIsNone(brief["orchestrator"])
+        self.assertIsNone(brief["transcript"])
+        self.assertEqual((brief["session"]["name"], brief["session"]["source"],
+                          brief["session"]["adopt"]), ("w3_p1", "pane_id", None))
+        self.assertEqual(brief["warnings"],
+                         ["unnamed_session: run 'nakama session start <name> --about \"<one line>\"'",
+                          "no_handoff_notes"])
+
+    def test_brief_pane_bound_session_offers_adopt_and_flags_old_surface(self):
+        self.named_meta("cart-rework", "w3:p2", agent=None)
+        self.set_state(status="idle")
+        rc, brief = self.brief(env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+        self.assertEqual(rc, 0, brief)
+        self.assertEqual(brief["session"]["source"], "env")
+        self.assertIsNone(brief["session"]["adopt"])
+        self.assertEqual(brief["orchestrator"],
+                         {"pane": "w3:p2", "status": "idle", "maybe_alive": True})
+        self.assertIn("old_orchestrator_surface_may_be_alive (w3:p2)", brief["warnings"])
+        rc, brief = self.brief(env={**self.env, "HERDR_PANE_ID": "w3:p2"})
+        self.assertEqual(rc, 0, brief)
+        self.assertEqual(brief["session"]["source"], "pane")
+        self.assertEqual(brief["session"]["adopt"], "export NAKAMA_SESSION=cart-rework")
+        self.assertFalse(brief["orchestrator"]["maybe_alive"])
+        self.assertNotIn("old_orchestrator_surface_may_be_alive (w3:p2)", brief["warnings"])
+
+    def test_brief_reports_handoff_notes(self):
+        self.named_meta("cart-rework", "w3:p1")
+        self.set_state(status="idle")
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        notes = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework" / "notes.md"
+        notes.write_text("- 10:00 did a thing\n")
+        rc, brief = self.brief(env=env)
+        self.assertEqual(rc, 0, brief)
+        self.assertTrue(brief["notes"]["exists"])
+        self.assertEqual(brief["notes"]["path"], str(notes))
+        self.assertIsInstance(brief["notes"]["age_minutes"], float)
+        self.assertGreaterEqual(brief["notes"]["age_minutes"], 0.0)
+        self.assertNotIn("no_handoff_notes", brief["warnings"])
+        notes.unlink()
+        rc, brief = self.brief(env=env)
+        self.assertFalse(brief["notes"]["exists"])
+        self.assertIsNone(brief["notes"]["age_minutes"])
+        self.assertIn("no_handoff_notes", brief["warnings"])
+
+    def test_brief_lists_only_this_sessions_workers(self):
+        mine = self.launch()
+        self.pane_record("b1-other", "another-run", "w3:p2")
+        self.set_state(status="idle")
+        rc, brief = self.brief()
+        self.assertEqual(rc, 0, brief)
+        self.assertEqual([row["name"] for row in brief["workers"]], [mine["name"]])
+
+    def test_brief_closed_includes_closed_workers(self):
+        self.pane_record("b1-open", "w3:p1", "w3:p1")
+        self.pane_record("b1-done", "w3:p1", "w3:p1", closed=True)
+        self.set_state(status="idle")
+        self.assertEqual([row["name"] for row in self.brief()[1]["workers"]], ["b1-open"])
+        rc, brief = self.brief("--closed")
+        self.assertEqual(rc, 0, brief)
+        rows = {row["name"]: row for row in brief["workers"]}
+        self.assertEqual(sorted(rows), ["b1-done", "b1-open"])
+        self.assertIsNone(rows["b1-done"]["state"])
+
+    def test_brief_is_read_only(self):
+        self.named_meta("cart-rework", "w3:p1")
+        self.pane_record("b1-x", "cart-rework", "w3:p1")
+        box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / "cart-rework"
+        box.mkdir(parents=True)
+        (box / "unread.md").write_text("hi")
+        self.set_state(status="idle")
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        state_dir = Path(self.env["NAKAMA_STATE_DIR"])
+
+        def snap():
+            rows = []
+            for label, top in (("state", state_dir), ("agent", self.root / ".agent")):
+                if not top.is_dir():
+                    continue
+                for path in [top, *top.rglob("*")]:
+                    st = path.stat()
+                    rows.append((label, str(path.relative_to(top)), st.st_mtime_ns,
+                                 None if path.is_dir() else st.st_size))
+            return sorted(rows)
+
+        before = snap()
+        self.assertEqual(self.brief(env=env)[0], 0)
+        self.assertEqual(self.brief("--closed", env=env)[0], 0)
+        self.assertEqual(before, snap())
+        self.assertTrue((box / "unread.md").is_file())
+
+    def test_brief_survives_bad_records_and_odd_herdr(self):
+        self.pane_record("b1-ok", "w3:p1", "w3:p1")
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        (state / "b1-noworktree.json").write_text(json.dumps(
+            {"name": "b1-noworktree", "role": "builder", "session": "w3:p1"}))
+        (state / "broken.json").write_text("{")
+        self.set_state(status="")
+        rc, brief = self.brief()
+        self.assertEqual(rc, 0, brief)
+        rows = {row["name"]: row for row in brief["workers"]}
+        self.assertEqual(sorted(rows), ["b1-noworktree", "b1-ok"])
+        self.assertEqual(rows["b1-ok"]["state"], "")
+        self.assertIn("error", rows["b1-noworktree"])
+        self.assertIsNone(rows["b1-noworktree"]["result"])
+        self.assertFalse(rows["b1-noworktree"]["worktree_dirty"])
+        self.assertEqual(rows["b1-noworktree"]["mail"], {"unread": 0, "kinds": []})
+
+    def test_brief_help_listed(self):
+        text = self.help_text()
+        self.assertIn("brief", text)
+        self.assertIn("read-only bearings", text)
 
 
 if __name__ == "__main__":
