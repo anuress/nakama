@@ -1297,8 +1297,17 @@ def cmd_session_start(a):
 def cmd_session_ls(a):
     require_herdr()
     now = time.time()
+    # A listing must survive a record that save() is rewriting: skip unreadable files, do not use records().
+    recs = []
+    for path in sorted(STATE_DIR.glob("*.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("name"), str) and rec["name"]:
+            recs.append(rec)
     by_key = {}
-    for rec in records():
+    for rec in recs:
         by_key.setdefault(record_session(rec), []).append(rec)
 
     def record_time(rec):
@@ -1307,11 +1316,11 @@ def cmd_session_ls(a):
         except (OSError, KeyError):
             return None
 
-    def newest(recs):
-        return max(recs, key=lambda rec: record_time(rec) or 0)
+    def newest(group):
+        return max(group, key=lambda rec: record_time(rec) or 0)
 
-    def record_times(recs):
-        return [t for t in (record_time(rec) for rec in recs) if t is not None]
+    def record_times(group):
+        return [t for t in (record_time(rec) for rec in group) if t is not None]
 
     def notes_info(key):
         try:
@@ -1323,19 +1332,23 @@ def cmd_session_ls(a):
     def inbox_unread(key):
         return sum(1 for _ in inbox_dir(ORCH, key).glob("*.md"))
 
-    def worker_counts(recs):
-        return {"open": sum(1 for rec in recs if not rec["closed"]), "total": len(recs)}
+    def worker_counts(group):
+        return {"open": sum(1 for rec in group if not rec.get("closed")), "total": len(group)}
 
     named = sessions_on_disk()
     rows = []
     for key, meta in named.items():
-        recs = by_key.get(key, [])
+        try:
+            meta_time = (session_dir(key) / "meta.json").stat().st_mtime
+        except OSError:
+            continue  # a failed session start can remove it after sessions_on_disk() read it
+        group = by_key.get(key, [])
         notes, notes_time = notes_info(key)
-        times = [(session_dir(key) / "meta.json").stat().st_mtime, notes_time, *record_times(recs)]
+        times = [meta_time, notes_time, *record_times(group)]
         pane = meta.get("owner_pane")
         alive, pane_reused = session_liveness(meta, pane_agent(pane))
         token = meta.get("agent")
-        workers = worker_counts(recs)
+        workers = worker_counts(group)
         rows.append({"name": meta.get("name"), "about": meta.get("about"),
                      "last_seen": max(t for t in times if t is not None),
                      "created": meta.get("created"), "pane": pane,
@@ -1346,30 +1359,33 @@ def cmd_session_ls(a):
                      "stale": not alive and workers["open"] == 0})
 
     unnamed = []
-    for key, recs in by_key.items():
-        workers = worker_counts(recs)
-        if key in named or workers["open"] == 0:
+    for key, group in by_key.items():
+        workers = worker_counts(group)
+        times = record_times(group)
+        if key in named or workers["open"] == 0 or not times:
             continue
-        unnamed.append({"session": key, "pane": newest(recs).get("orch_pane"),
-                        "workers_open": workers["open"], "last_seen": max(record_times(recs))})
+        unnamed.append({"session": key, "pane": newest(group).get("orch_pane"),
+                        "workers_open": workers["open"], "last_seen": max(times)})
     unnamed.sort(key=lambda row: row["last_seen"], reverse=True)
 
     if a.legacy:
-        for key, recs in by_key.items():
+        for key, group in by_key.items():
             if key in named:
                 continue
-            rec = newest(recs)
+            rec = newest(group)
             pane = rec.get("orch_pane")
-            alive = pane is not None and agent_status(pane) is not None
-            workers = worker_counts(recs)
+            alive = pane_agent(pane) is not None
+            workers = worker_counts(group)
             notes, _ = notes_info(key)
-            rows.append({"name": key, "about": None, "last_seen": max(record_times(recs)),
+            rows.append({"name": key, "about": None,
+                         "last_seen": max(record_times(group), default=None),
                          "created": None, "pane": pane, "alive": alive, "pane_reused": False,
                          "kind": None, "resume_with": None, "workers": workers, "notes": notes,
                          "inbox_unread": inbox_unread(key), "legacy": True,
                          "stale": not alive and workers["open"] == 0, "cwd": rec.get("worktree")})
 
-    rows.sort(key=lambda row: row["last_seen"], reverse=True)
+    # Tolerate a row whose record files all vanished: sort it last.
+    rows.sort(key=lambda row: (row["last_seen"] is not None, row["last_seen"] or 0), reverse=True)
     emit({"sessions": rows, "unnamed": unnamed})
 
 

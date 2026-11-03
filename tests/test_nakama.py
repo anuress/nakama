@@ -3020,6 +3020,27 @@ Broken role.
         self.assertEqual(rows["w3_p9"]["workers"], {"open": 0, "total": 1})
         self.assertEqual(rows["w3_p9"]["pane"], "w3:p9")
 
+    def test_session_ls_legacy_survives_odd_herdr_payload(self):
+        self.pane_record("b1-pane", "w3_p9", "w3:p9", closed=True)
+        self.set_state(status="")
+        rc, out = self.session_ls("--legacy")
+        self.assertEqual(rc, 0, out)
+        rows = {row["name"]: row for row in out["sessions"]}
+        self.assertIsInstance(rows["w3_p9"]["alive"], bool)
+
+    def test_session_ls_skips_unreadable_record_files(self):
+        self.named_meta("cart-rework", "w3:p1")
+        self.pane_record("b1-good", "cart-rework", "w3:p1")
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        (state / "bad.json").write_text("{")
+        (state / "noname.json").write_text("{}")
+        (state / "noclosed.json").write_text(json.dumps(
+            {"name": "b1-noclosed", "session": "cart-rework", "orch_pane": "w3:p1"}))
+        self.set_state(status="idle")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["sessions"][0]["workers"], {"open": 2, "total": 2})
+
     def test_session_ls_is_read_only(self):
         self.named_meta("cart-rework", "w3:p1")
         self.pane_record("b1-x", "cart-rework", "w3:p1")
