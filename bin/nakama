@@ -246,8 +246,13 @@ def readable_records():
             rec = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(rec, dict) and isinstance(rec.get("name"), str) and rec["name"]:
-            recs.append(rec)
+        if not (isinstance(rec, dict) and isinstance(rec.get("name"), str) and rec["name"]):
+            continue
+        # A non-string session makes session_key()'s re.sub raise in every reader that groups records.
+        if any(key in rec and rec[key] is not None and not isinstance(rec[key], str)
+               for key in ("session", "orch_pane")):
+            continue
+        recs.append(rec)
     return recs
 
 
@@ -510,8 +515,9 @@ def steps_info(rec):
 
 def worktree_dirty(rec):
     try:
-        result = run(["git", "status", "--porcelain", "--", ".", ":(exclude).agent"],
-                     cwd=rec["worktree"], check=False)
+        # --no-optional-locks: a read-only caller must not let status refresh and rewrite the index.
+        result = run(["git", "--no-optional-locks", "status", "--porcelain", "--", ".",
+                      ":(exclude).agent"], cwd=rec["worktree"], check=False)
     except OSError:
         return False
     return result.returncode == 0 and bool(result.stdout)

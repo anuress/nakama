@@ -3041,6 +3041,16 @@ Broken role.
         self.assertEqual(rc, 0, out)
         self.assertEqual(out["sessions"][0]["workers"], {"open": 2, "total": 2})
 
+    def test_session_ls_skips_record_with_non_string_session(self):
+        self.named_meta("cart-rework", "w3:p1")
+        self.pane_record("b1-good", "cart-rework", "w3:p1")
+        (Path(self.env["NAKAMA_STATE_DIR"]) / "b1-broken.json").write_text(json.dumps(
+            {"name": "b1-broken", "session": 5, "worktree": str(self.root)}))
+        self.set_state(status="idle")
+        rc, out = self.session_ls()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["sessions"][0]["workers"], {"open": 1, "total": 1})
+
     def test_session_ls_is_read_only(self):
         self.named_meta("cart-rework", "w3:p1")
         self.pane_record("b1-x", "cart-rework", "w3:p1")
@@ -3217,6 +3227,9 @@ Broken role.
     def test_brief_is_read_only(self):
         self.named_meta("cart-rework", "w3:p1")
         self.pane_record("b1-x", "cart-rework", "w3:p1")
+        worker_inbox = Path(self.root, ".agent", "b1-x", "inbox")
+        worker_inbox.mkdir(parents=True)
+        (worker_inbox / f"{time.time_ns()}.orchestrator.info.md").write_text("note")
         box = Path(self.env["NAKAMA_STATE_DIR"]) / "inbox" / "orchestrator" / "cart-rework"
         box.mkdir(parents=True)
         (box / "unread.md").write_text("hi")
@@ -3241,11 +3254,31 @@ Broken role.
         self.assertEqual(before, snap())
         self.assertTrue((box / "unread.md").is_file())
 
+    def test_brief_does_not_rewrite_worktree_git_index(self):
+        wt = self.root / "index-wt"
+        wt.mkdir()
+        self.wgit(wt, "init", "-q")
+        Path(wt, "tracked.txt").write_text("v1")
+        self.wgit(wt, "add", "tracked.txt")
+        self.wgit(wt, "commit", "-q", "-m", "root")
+        self.pane_record("b1-index", "w3:p1", "w3:p1", worktree=str(wt))
+        self.set_state(status="idle")
+        index = wt / ".git" / "index"
+        # A stale stat cache makes plain `git status` refresh and rewrite the index.
+        stale = time.time() + 10
+        os.utime(wt / "tracked.txt", (stale, stale))
+        before = (index.stat().st_mtime_ns, index.stat().st_size)
+        self.brief_row("b1-index")
+        self.brief_row("b1-index")
+        self.assertEqual((index.stat().st_mtime_ns, index.stat().st_size), before)
+
     def test_brief_survives_bad_records_and_odd_herdr(self):
         self.pane_record("b1-ok", "w3:p1", "w3:p1")
         state = Path(self.env["NAKAMA_STATE_DIR"])
         (state / "b1-noworktree.json").write_text(json.dumps(
             {"name": "b1-noworktree", "role": "builder", "session": "w3:p1"}))
+        (state / "b1-broken.json").write_text(json.dumps(
+            {"name": "b1-broken", "session": 5, "worktree": str(self.root)}))
         (state / "broken.json").write_text("{")
         self.set_state(status="")
         rc, brief = self.brief()
