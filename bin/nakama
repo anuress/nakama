@@ -337,6 +337,8 @@ def agent_status(name):
 
 
 def pane_agent(pane):
+    if not isinstance(pane, str) or not pane:
+        return None
     try:
         p = run(["herdr", "agent", "get", pane], check=False)
     except OSError:
@@ -362,8 +364,12 @@ def pane_agent_session(pane):
     agent, kind, value = (session.get(key) for key in ("agent", "kind", "value"))
     if not all(isinstance(part, str) and part for part in (agent, kind, value)):
         return None
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = None
     return {"agent": agent, "kind": kind, "value": value,
-            "source": f"herdr:{agent}", "cwd": os.getcwd()}
+            "source": f"herdr:{agent}", "cwd": cwd}
 
 
 def resume_command(token):

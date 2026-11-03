@@ -2835,6 +2835,52 @@ Broken role.
         self.assertEqual(rc, 2, err)
         self.assertEqual(err["resume_with"], f"claude --resume {uuid}")
 
+    def test_launch_without_pane_id_keeps_agent_session_resume_token(self):
+        token = {"agent": "pi", "kind": "path", "value": "/abs/nopane.jsonl"}
+        self.set_state(status="idle", agent_session=token)
+        self.assertEqual(self.start_session()[0], 0)
+        before = json.loads(self.session_meta_file().read_text())["agent"]
+        env = {k: v for k, v in self.env.items() if k != "HERDR_PANE_ID"}
+        env["NAKAMA_SESSION"] = "cart-rework"
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"], before)
+
+    def test_session_start_records_agent_session_when_cwd_is_gone(self):
+        value = "/abs/gone.jsonl"
+        self.set_state(status="idle", agent_session={"agent": "pi", "kind": "path", "value": value})
+        gone = self.root / "gone-cwd"
+        gone.mkdir()
+        script = (f"cd {shlex.quote(str(gone))} && rmdir {shlex.quote(str(gone))} && "
+                  f"exec {shlex.quote(sys.executable)} {shlex.quote(str(NAKAMA))} "
+                  "session start cart-rework --about gone")
+        p = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, (p.stdout, p.stderr))
+        self.assertEqual(json.loads(p.stdout)["name"], "cart-rework")
+        agent = json.loads(self.session_meta_file().read_text())["agent"]
+        self.assertIsNone(agent["cwd"])
+        self.assertEqual(agent["value"], value)
+
+    def test_nested_launch_records_orchestrator_agent_session_resume_token(self):
+        user_roles = self.root / "userroles"
+        user_roles.mkdir()
+        (user_roles / "lead.md").write_text(
+            "---\nprefix: l\nkind: pi\nmode: write\nspawns: true\n---\nLead.\n")
+        self.set_state(status="idle")
+        self.assertEqual(self.start_session()[0], 0)
+        rc, parent = self.nakama("launch", "lead", "Parent",
+                                 env={**self.env, "NAKAMA_SESSION": "cart-rework"})
+        self.assertEqual(rc, 0, parent)
+        self.assertIsNone(json.loads(self.session_meta_file().read_text())["agent"])
+        token = {"agent": "pi", "kind": "path", "value": "/abs/orch.jsonl"}
+        self.set_state(status="idle", statuses={"w3:p77": None}, agent_session=token)
+        child_env = {**self.env, "NAKAMA_AGENT": parent["name"], "HERDR_PANE_ID": "w3:p77"}
+        rc, child = self.nakama("launch", "builder", "Child", "--kind", "pi", env=child_env)
+        self.assertEqual(rc, 0, child)
+        self.assertEqual(json.loads(self.session_meta_file().read_text())["agent"],
+                         {**token, "source": "herdr:pi", "cwd": os.path.realpath(str(self.root))})
+
 
 if __name__ == "__main__":
     unittest.main()
