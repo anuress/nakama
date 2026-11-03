@@ -225,6 +225,13 @@ def save(rec):
     record_path(rec["name"]).write_text(json.dumps(rec, indent=2))
 
 
+def patch_record(name, **changes):
+    """Read-modify-write only the given fields, so a long-running waiter cannot clobber a concurrent update."""
+    rec = load(name)
+    rec.update(changes)
+    save(rec)
+
+
 def records():
     return [json.loads(p.read_text()) for p in sorted(STATE_DIR.glob("*.json"))]
 
@@ -246,15 +253,20 @@ def save_session_meta(meta):
     path.parent.mkdir(parents=True, exist_ok=True)
     # O_EXCL temp + replace: a concurrent reader sees the old meta or the new one, never half of it.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.unlink(missing_ok=True)  # our own leftover from a crashed run must not block O_EXCL
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(meta, indent=2))
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(meta, indent=2))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def session_keys():
     try:
-        return sorted(p.name for p in (STATE_DIR / "sessions").iterdir() if p.is_dir())
+        return sorted(p.name for p in (STATE_DIR / "sessions").iterdir()
+                      if p.is_dir() and not p.name.startswith("."))  # .by-pane holds pane claims
     except OSError:
         return []
 
@@ -702,9 +714,10 @@ def cmd_wait(a):
                     # pi keeps bash and write in read mode, so that mode is only an instruction: fail closed on its effect.
                     now = git_state(rec)
                     bad = now is None or any(now[k] != before[k] for k in ("head", "stash", "tree"))
-                    rec["receipt"] = {"status": "tampered" if bad else status, "reviewed_head": before["head"],
-                                      "head_at_result": now and now["head"]}
-                    save(rec)
+                    receipt = {"status": "tampered" if bad else status, "reviewed_head": before["head"],
+                               "head_at_result": now and now["head"]}
+                    rec["receipt"] = receipt
+                    patch_record(rec["name"], receipt=receipt)
                 if rec["receipt"]["status"] == "tampered":
                     done("tampered", reason="read-only worker changed HEAD, the stash or files outside .agent/")
                 extra["reviewed_head"] = rec["receipt"]["reviewed_head"]
@@ -743,7 +756,7 @@ def cmd_wait(a):
             now = time.time()
             if screen_sig != rec.get("screen_sig"):
                 rec.update(screen_sig=screen_sig, screen_changed_at=now)
-                save(rec)
+                patch_record(rec["name"], screen_sig=screen_sig, screen_changed_at=now)
             else:
                 idle_seconds = now - rec.get("screen_changed_at", now)
                 if idle_seconds >= stall_sec:
@@ -754,7 +767,7 @@ def cmd_wait(a):
             if rec["nudged_at"]:
                 done("failed", reason="no fresh result.md after one nudge")
             rec["nudged_at"] = time.time()
-            save(rec)
+            patch_record(rec["name"], nudged_at=rec["nudged_at"])
             rel = agent_dir(rec).relative_to(rec["worktree"])
             run(["herdr", "agent", "prompt", rec["name"], f"Write {rel}/result.md as your task file requires."],
                 check=False)
@@ -1072,7 +1085,10 @@ def cmd_session_start(a):
     # unreadable meta.json must not make its session invisible to this check.
     for key in session_keys():
         if key.casefold() == a.name.casefold():
-            existing = session_meta(key) or {}
+            existing = session_meta(key)
+            if existing is None:
+                emit({"error": f"session {key} already exists but its meta.json is unreadable; "
+                                f"remove {session_dir(key)} or pick another name"}, 2)
             owner = existing.get("owner_pane")
             emit({"error": f"session {key} already exists", "session": key,
                   "about": existing.get("about"), "pane": owner,
@@ -1080,26 +1096,46 @@ def cmd_session_start(a):
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         emit({"error": "no HERDR_PANE_ID: session start must run inside a herdr pane"}, 2)
-    for key, meta in sessions_on_disk().items():
-        if meta.get("owner_pane") == pane:
-            emit({"error": f"this pane already owns session {key} ({meta.get('about')})",
-                  "session": key, "about": meta.get("about"), "pane": pane}, 2)
-    # Claim the directory exclusively: two simultaneous starts cannot both win the name.
-    (STATE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
+    claims = STATE_DIR / "sessions" / ".by-pane"
+    claims.mkdir(parents=True, exist_ok=True)
+    claim = claims / session_key(pane)
+    ours = created = False
     try:
-        session_dir(a.name).mkdir()
-    except FileExistsError:
-        emit({"error": f"session {a.name} already exists"}, 2)
-    now = time.time()
-    save_session_meta({"name": a.name, "about": about, "owner_pane": pane,
-                       "created": now, "last_seen": now, "adoptions": [], "agent": None})
-    # Naming a run after it started must not hide its own workers from it.
-    rebound = 0
-    for rec in open_records():
-        if record_session(rec) == session_key(pane) or rec.get("orch_pane") == pane:
-            rec["session"] = a.name
-            save(rec)
-            rebound += 1
+        try:
+            # Exclusive per-pane claim: two starts racing in one pane cannot both pass the owner check.
+            os.close(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            ours = True
+        except FileExistsError:
+            owned = claim.read_text().strip()
+            emit({"error": f"this pane already owns session {owned}", "session": owned,
+                  "about": (session_meta(owned) or {}).get("about"), "pane": pane}, 2)
+        claim.write_text(a.name)
+        for key, meta in sessions_on_disk().items():
+            if meta.get("owner_pane") == pane:
+                emit({"error": f"this pane already owns session {key} ({meta.get('about')})",
+                      "session": key, "about": meta.get("about"), "pane": pane}, 2)
+        try:
+            session_dir(a.name).mkdir()
+            created = True
+        except FileExistsError:
+            emit({"error": f"session {a.name} already exists"}, 2)
+        now = time.time()
+        save_session_meta({"name": a.name, "about": about, "owner_pane": pane,
+                           "created": now, "last_seen": now, "adoptions": [], "agent": None})
+        # Naming a run after it started must not hide its own workers from it.
+        # shortcut: a mid-loop failure leaves some records rebound and the session dir in place;
+        # recover by removing the session dir and re-running start.
+        rebound = 0
+        for rec in open_records():
+            if record_session(rec) == session_key(pane):
+                patch_record(rec["name"], session=a.name)
+                rebound += 1
+    except BaseException:
+        if created:
+            shutil.rmtree(session_dir(a.name), ignore_errors=True)
+        if ours:
+            claim.unlink(missing_ok=True)
+        raise
     emit({"name": a.name, "about": about, "dir": str(session_dir(a.name)),
           "export": f"export NAKAMA_SESSION={a.name}", "rebound": rebound})
 

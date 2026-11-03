@@ -33,6 +33,7 @@ elif cmd == ["agent", "list"]:
 elif cmd == ["agent", "start"]:
     sys.exit(st.get("start_rc", 0))
 elif cmd == ["agent", "get"]:
+    time.sleep(float(os.environ.get("FAKE_GET_SLEEP") or 0))  # lets a test act while `wait` is mid-loop
     name = args[2]
     status = st["statuses"].get(name) if name in st.get("statuses", {}) else st.get("status")
     if status is None:
@@ -2359,12 +2360,19 @@ Broken role.
         box.mkdir(parents=True, exist_ok=True)
         (box / f"{time.time_ns()}.b1-x.info.md").write_text(text)
 
-    def pane_record(self, name, session, pane):
+    def pane_record(self, name, session, pane, **extra):
         state = Path(self.env["NAKAMA_STATE_DIR"])
         state.mkdir(parents=True, exist_ok=True)
-        (state / f"{name}.json").write_text(json.dumps({
-            "name": name, "role": "builder", "kind": "pi", "worktree": str(self.root),
-            "rounds": 0, "closed": False, "session": session, "orch_pane": pane}))
+        rec = {"name": name, "role": "builder", "kind": "pi", "worktree": str(self.root),
+               "rounds": 0, "closed": False, "session": session, "orch_pane": pane}
+        (state / f"{name}.json").write_text(json.dumps({**rec, **extra}))
+
+    def wait_for_call(self, *prefix):
+        for _ in range(500):
+            if any(c[:len(prefix)] == list(prefix) for c in self.calls()):
+                return
+            time.sleep(0.01)
+        self.fail(f"no herdr call {prefix}")
 
     def test_session_start_creates_bound_meta_and_export(self):
         rc, out = self.start_session()
@@ -2462,6 +2470,57 @@ Broken role.
         files = [p.name for p in
                  (Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "cart-rework").iterdir()]
         self.assertEqual(files, ["meta.json"])
+
+    def test_wait_save_does_not_clobber_a_concurrent_session_rebind(self):
+        self.pane_record("b1-x", "w3_p1", "w3:p1", prompted_at=time.time(), nudged_at=None,
+                         budget_min=45, extended_min=0, mode="write")
+        self.set_state(status="working", screen="SCREEN one")
+        proc = subprocess.Popen([sys.executable, str(NAKAMA), "wait", "b1-x", "--timeout", "0.5"],
+                                env={**self.env, "FAKE_GET_SLEEP": "1.5"}, cwd=self.root,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.wait_for_call("herdr", "agent", "get")  # `wait` has loaded the record
+            rc, out = self.start_session("named")
+            self.assertEqual(rc, 0, out)
+            proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertEqual(self.record("b1-x")["session"], "named")
+
+    def test_session_start_rebind_ignores_another_sessions_worker(self):
+        self.pane_record("b1-other", "other-session", "w3:p1")
+        rc, out = self.start_session("named")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["rebound"], 0)
+        self.assertEqual(self.record("b1-other")["session"], "other-session")
+
+    def test_session_start_failure_leaves_no_directory(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "broken.json").write_text("{not json")  # makes the rebind step raise mid-start
+        rc, out = self.start_session("named")
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse((state / "sessions" / "named").exists())
+        self.assertFalse((state / "sessions" / ".by-pane" / "w3_p1").exists())
+
+    def test_session_start_reports_incomplete_existing_directory(self):
+        ghost = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "ghost"
+        ghost.mkdir(parents=True)
+        rc, err = self.start_session("ghost")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("unreadable", err["error"])
+        self.assertIn(str(ghost), err["error"])
+
+    def test_session_start_second_concurrent_claim_is_refused(self):
+        claim = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / ".by-pane" / "w3_p1"
+        claim.parent.mkdir(parents=True)
+        claim.write_text("alpha")
+        rc, err = self.start_session("beta")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["session"], "alpha")
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "beta").exists())
 
     def test_session_resolution_uses_pane_bound_session(self):
         self.assertEqual(self.start_session()[0], 0)
