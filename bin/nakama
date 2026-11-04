@@ -1488,6 +1488,38 @@ def cmd_brief(a):
           "warnings": warnings})
 
 
+def cmd_note(a):
+    """Append one line to the session's handoff notes; existing bytes are never rewritten."""
+    require_herdr()
+    key = session_key(current_session())
+    if session_meta(key) is None:
+        emit({"error": f"session {key} not named; run: nakama session start <name> --about \"<one line>\""}, 2)
+    path = session_dir(key) / "notes.md"
+    now = time.localtime()
+    day, stamp = time.strftime("%Y-%m-%d", now), time.strftime("%H:%M", now)
+    line = f"- {stamp} {digest_text(a.text)}"
+    try:
+        existing = path.read_bytes().decode("utf-8", errors="replace") if path.is_file() else ""
+        # Only the last heading line counts; rstrip tolerates a hand-edited CRLF or trailing space.
+        headings = [l.rstrip() for l in existing.splitlines() if l.startswith("## ")]
+        heading_added = not headings or headings[-1] != f"## {day}"
+        chunk = ""
+        if existing and not existing.endswith("\n"):
+            chunk += "\n"
+        if heading_added:
+            chunk += ("\n" if existing else "") + f"## {day}\n\n"
+        data = (chunk + line + "\n").encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            while data:
+                data = data[os.write(fd, data):]
+        finally:
+            os.close(fd)
+    except OSError as e:
+        emit({"error": f"cannot write notes {path}: {e}"}, 2)
+    emit({"session": key, "path": str(path), "line": line, "heading_added": heading_added})
+
+
 def digest_cut(text, limit):
     return text[:limit] + "…" if len(text) > limit else text
 
@@ -1888,6 +1920,8 @@ def main():
     s = sub.add_parser("brief", help="read-only bearings for adopting this session: orchestrator, "
                                      "transcript, notes, workers, unread mail")
     s.add_argument("--closed", action="store_true", help="include closed workers")
+    s = sub.add_parser("note", help="append a timestamped line to session's handoff notes (notes.md)")
+    s.add_argument("text", help="one line; quote it")
     s = sub.add_parser("digest", help="render this session's orchestrator transcript into a "
                                      "bounded markdown digest for a handoff to another agent kind")
     s.add_argument("--tail", type=int, default=200, metavar="N",
@@ -1911,6 +1945,7 @@ def main():
     {"launch": cmd_launch, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
      "pause": cmd_pause, "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
      "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "brief": cmd_brief,
+     "note": cmd_note,
      "digest": cmd_digest}[a.cmd](a)
 
 

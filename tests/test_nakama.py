@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -3204,6 +3205,97 @@ Broken role.
         self.assertFalse(brief["notes"]["exists"])
         self.assertIsNone(brief["notes"]["age_minutes"])
         self.assertIn("no_handoff_notes", brief["warnings"])
+
+    def note_env(self, key="cart-rework"):
+        self.named_meta(key, "w3:p1")
+        return {**self.env, "NAKAMA_SESSION": key}
+
+    def notes_path(self, key="cart-rework"):
+        return Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / key / "notes.md"
+
+    def test_note_creates_file_with_heading_then_appends(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        rc, first = self.nakama("note", "first", env=env)
+        self.assertEqual(rc, 0, first)
+        self.assertTrue(first["heading_added"])
+        self.assertTrue(notes.is_file())
+        self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
+        rc, second = self.nakama("note", "second", env=env)
+        self.assertEqual(rc, 0, second)
+        self.assertFalse(second["heading_added"])
+        content = notes.read_text()
+        today = re.escape(time.strftime("%Y-%m-%d"))
+        self.assertRegex(content, rf"^## {today}\n\n- \d\d:\d\d first\n- \d\d:\d\d second\n\Z")
+        self.assertEqual(second["line"], content.splitlines()[-1])
+
+    def test_note_starts_new_heading_on_a_new_day(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        today = re.escape(time.strftime("%Y-%m-%d"))
+        notes.write_text("## 2000-01-01\n\n- 09:00 old\n")
+        rc, out = self.nakama("note", "new", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["heading_added"])
+        self.assertRegex(notes.read_text(),
+                         rf"\A## 2000-01-01\n\n- 09:00 old\n\n## {today}\n\n- \d\d:\d\d new\n\Z")
+        notes.write_text("## 2000-01-01\n\n- 09:00 old")
+        rc, out = self.nakama("note", "new", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["heading_added"])
+        self.assertRegex(notes.read_text(),
+                         rf"\A## 2000-01-01\n\n- 09:00 old\n\n## {today}\n\n- \d\d:\d\d new\n\Z")
+
+    def test_note_repairs_missing_trailing_newline(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        today = re.escape(time.strftime("%Y-%m-%d"))
+        notes.write_text(f"## {time.strftime('%Y-%m-%d')}\n\n- 09:00 old")
+        rc, out = self.nakama("note", "new", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(out["heading_added"])
+        self.assertRegex(notes.read_text(),
+                         rf"\A## {today}\n\n- 09:00 old\n- \d\d:\d\d new\n\Z")
+
+    def test_note_refuses_unnamed_session(self):
+        rc, out = self.nakama("note", "hello")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("session start", out["error"])
+        self.assertFalse((Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "w3_p1").exists())
+
+    def test_note_reaches_brief(self):
+        env = self.note_env()
+        self.set_state(status="idle")
+        rc, out = self.nakama("note", "decided X", env=env)
+        self.assertEqual(rc, 0, out)
+        rc, brief = self.brief(env=env)
+        self.assertEqual(rc, 0, brief)
+        self.assertTrue(brief["notes"]["exists"])
+        self.assertEqual(brief["notes"]["path"], out["path"])
+        self.assertNotIn("no_handoff_notes", brief["warnings"])
+        self.assertIn("decided X", Path(out["path"]).read_text())
+
+    def test_note_write_failure_is_rc_2(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        notes.mkdir()
+        rc, out = self.nakama("note", "hello", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertTrue(out["error"].startswith("cannot write notes"), out)
+
+    def test_note_help_listed(self):
+        text = self.help_text()
+        self.assertIn("append a timestamped line", text)
+
+    def test_note_stores_text_verbatim(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        text = "-x and \u2028 and \u00e9"
+        rc, out = self.nakama("note", "--", text, env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(text, notes.read_text())
+        self.assertEqual(out["line"].split(" ", 2)[2], text)
+
 
     def test_brief_lists_only_this_sessions_workers(self):
         mine = self.launch()
