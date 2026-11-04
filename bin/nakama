@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """nakama: run pi / Claude Code workers in herdr panes. Usage: see ../skills/nakama/SKILL.md."""
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -224,7 +225,14 @@ def load(name):
 
 def save(rec):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    record_path(rec["name"]).write_text(json.dumps(rec, indent=2))
+    path = record_path(rec["name"])
+    # Atomic: an interrupted write must not truncate a record readable_records() would then skip.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(rec, indent=2))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def patch_record(name, **changes):
@@ -281,6 +289,29 @@ def save_session_meta(meta):
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def pane_claim_lock():
+    """One flock guards meta.json and the pane claims: adoption, description and launch must not interleave."""
+    claims = STATE_DIR / "sessions" / ".by-pane"
+    claims.mkdir(parents=True, exist_ok=True)
+    fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield claims
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def claim_text(path):
+    try:
+        return path.read_bytes().decode("ascii", errors="replace").strip()
+    except FileNotFoundError:
+        return ""
 
 
 def session_keys():
@@ -670,9 +701,11 @@ def refresh_session_agent(session):
     token = pane_agent_session(launcher_orch_pane())
     if token is None:
         return
-    meta = session_meta(key)
-    if meta is not None:
-        save_session_meta({**meta, "agent": token})
+    # Re-read under the lock: a takeover or `session about` may have saved since the caller looked.
+    with pane_claim_lock():
+        meta = session_meta(key)
+        if meta is not None:
+            save_session_meta({**meta, "agent": token})
 
 
 def launcher_session():
@@ -1426,13 +1459,11 @@ def cmd_takeover(a):
     # Both before the lock: they call herdr, which must not run while others wait for the claims.
     terminal = pane_terminal(here)
     here_token = pane_agent_session(here)
-    claims = STATE_DIR / "sessions" / ".by-pane"
-    claims.mkdir(parents=True, exist_ok=True)
-    claim = claims / session_key(here)
-    lock_fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    repointed = 0
+    skipped = []
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
+        # The repoint runs under the lock too: two takeovers must never interleave meta and records.
+        with pane_claim_lock() as claims:
             meta = session_meta(key)
             if meta is None:
                 emit({"error": f"session {key} has an unreadable meta.json"}, 2)
@@ -1442,69 +1473,50 @@ def cmd_takeover(a):
                     emit({"error": f"this pane already owns session {other} "
                                    f"({other_meta.get('about')}); take over from another pane",
                           "session": other}, 2)
-            try:
-                held = claim.read_bytes().decode("ascii", errors="replace").strip()
-            except FileNotFoundError:
-                held = ""
-            if held != key and SESSION_NAME_RE.fullmatch(held):
-                held_meta = session_meta(held)
-                if session_owned_by_pane(held_meta, here, terminal):
-                    emit({"error": f"this pane already owns session {held} "
-                                   f"({held_meta.get('about')}); take over from another pane",
-                          "session": held}, 2)
             already_owner = session_owned_by_pane(meta, here, terminal)
             if not already_owner:
-                # Meta first: a crash after it still leaves the session here, and a re-run finishes a-c.
+                # Meta first: a crash after it still leaves the session here, and a re-run finishes b-c.
                 adoptions = meta.get("adoptions")
                 now = time.time()
+                save_session_meta({**meta, "name": key, "owner_pane": here,
+                                   "owner_terminal": terminal, "last_seen": now,
+                                   "adoptions": (adoptions if isinstance(adoptions, list) else [])
+                                   + [{"pane": here, "from": old, "at": now, "agent": meta.get("agent")}]})
+            # b and c run on both paths: a crash after the meta save must be repaired by a re-run.
+            claim = claims / session_key(here)
+            if claim_text(claim) != key:
+                owner_bytes = key.encode("ascii")
+                fd = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
                 try:
-                    save_session_meta({**meta, "name": key, "owner_pane": here,
-                                       "owner_terminal": terminal, "last_seen": now,
-                                       "adoptions": (adoptions if isinstance(adoptions, list) else [])
-                                       + [{"pane": here, "from": old, "at": now,
-                                           "agent": meta.get("agent")}]})
-                    owner_bytes = key.encode("ascii")
-                    fd = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-                    try:
-                        if os.write(fd, owner_bytes) != len(owner_bytes):
-                            raise OSError("short write to pane claim")
-                    finally:
-                        os.close(fd)
-                    if old and old != here:
-                        stale = claims / session_key(old)
-                        try:
-                            stale_text = stale.read_bytes().decode("ascii", errors="replace").strip()
-                        except FileNotFoundError:
-                            stale_text = None
-                        if stale_text == key:
-                            stale.unlink(missing_ok=True)
-                except OSError as exc:
-                    emit({"error": f"takeover failed: {exc}"}, 1)
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    finally:
-        os.close(lock_fd)
+                    if os.write(fd, owner_bytes) != len(owner_bytes):
+                        raise OSError("short write to pane claim")
+                finally:
+                    os.close(fd)
+            # c: once meta names us, any other pane still claiming this session is stale.
+            for path in claims.iterdir():
+                if not path.name.startswith(".") and path != claim and claim_text(path) == key:
+                    path.unlink(missing_ok=True)
+            # On both paths: a re-run after a crash between the meta write and here repoints the rest.
+            for rec in readable_records():
+                if not rec.get("session") or record_session(rec) != key or rec.get("orch_pane") == here:
+                    continue
+                try:
+                    rec2 = json.loads(record_path(rec["name"]).read_text())
+                except (OSError, ValueError):
+                    skipped.append(rec["name"])
+                    continue
+                if not isinstance(rec2, dict):
+                    skipped.append(rec["name"])
+                    continue
+                rec2["orch_pane"] = here
+                save(rec2)
+                repointed += 1
+    except OSError as exc:
+        emit({"error": f"takeover failed: {exc}", "repointed": repointed}, 1)
     # meta still holds the pre-save token: the adoption entry copies it, the next launch replaces it.
     old_agent = pane_agent(old) if old else None
     alive, _ = session_liveness(meta, old_agent)
     maybe_alive = alive and old != here
-    # On both paths, so a re-run after a crash between the meta write and here repoints the rest.
-    repointed = 0
-    skipped = []
-    for rec in readable_records():
-        if not rec.get("session") or record_session(rec) != key or rec.get("orch_pane") == here:
-            continue
-        try:
-            rec2 = json.loads(record_path(rec["name"]).read_text())
-        except (OSError, ValueError):
-            skipped.append(rec["name"])
-            continue
-        if not isinstance(rec2, dict):
-            skipped.append(rec["name"])
-            continue
-        rec2["orch_pane"] = here
-        save(rec2)
-        repointed += 1
     token = meta.get("agent")
     transcript = None
     if isinstance(token, dict):
@@ -1538,13 +1550,10 @@ def cmd_session_about(a):
         emit({"error": "about must be a single line"}, 2)
     if len(text) > SESSION_ABOUT_MAX:
         emit({"error": f"about must be at most {SESSION_ABOUT_MAX} characters"}, 2)
-    claims = STATE_DIR / "sessions" / ".by-pane"
-    claims.mkdir(parents=True, exist_ok=True)
-    lock_fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    previous = None
     try:
         # Same lock as takeover: a concurrent adoption must not resurrect the old description.
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
+        with pane_claim_lock():
             meta = session_meta(key)
             if meta is None:
                 if session_dir(key).is_dir():
@@ -1552,12 +1561,10 @@ def cmd_session_about(a):
                 emit({"error": f"session {key} is not named; run: nakama session start <name> "
                                f"--about \"...\""}, 2)
             previous = meta.get("about")
-            save_session_meta({**meta, "name": meta.get("name") or key, "about": text,
+            save_session_meta({**meta, "name": key, "about": text,
                                "last_seen": time.time()})
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    finally:
-        os.close(lock_fd)
+    except OSError as exc:
+        emit({"error": f"session about failed: {exc}"}, 1)
     emit({"name": key, "about": text, "previous": previous})
 
 

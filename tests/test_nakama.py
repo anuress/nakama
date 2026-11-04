@@ -3890,6 +3890,18 @@ Broken role.
         self.assertEqual(self.record("b1-a")["orch_pane"], "w3:p2")
         self.assertEqual(meta_path.read_bytes(), meta_before)
 
+    def test_takeover_already_owner_repairs_claims(self):
+        meta_path = self.named_meta("cart-rework", "w3:p2")
+        self.claim_file("w3_p1").write_text("cart-rework")
+        self.set_state(statuses={"w3:p2": "idle"})
+        meta_before = meta_path.read_bytes()
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["already_owner"])
+        self.assertEqual(self.claim_file("w3_p2").read_text(), "cart-rework")
+        self.assertFalse(self.claim_file("w3_p1").exists())
+        self.assertEqual(meta_path.read_bytes(), meta_before)
+
     def test_takeover_refuses_unknown_case_variant_and_bad_input(self):
         self.set_state(statuses={"w3:p2": "idle"})
         rc, err = self.takeover("nope")
@@ -3916,16 +3928,6 @@ Broken role.
         self.assertEqual(rc, 2, err)
         self.assertEqual(err["session"], "mine")
         self.assertIn("my own run", err["error"])
-        self.assertEqual(meta_path.read_bytes(), before)
-
-        shutil.rmtree(Path(self.env["NAKAMA_STATE_DIR"]) / "sessions")
-        meta_path = self.named_meta("cart-rework", "w3:p1")
-        before = meta_path.read_bytes()
-        self.named_meta("mine", "w3:p2", about="claim only")
-        self.claim_file("w3_p2").write_text("mine")
-        rc, err = self.takeover("cart-rework")
-        self.assertEqual(rc, 2, err)
-        self.assertEqual(err["session"], "mine")
         self.assertEqual(meta_path.read_bytes(), before)
 
     def test_takeover_cross_kind_and_env_warning(self):
@@ -3974,9 +3976,20 @@ Broken role.
         self.assertIn("unreadable", err["error"])
         self.assertEqual((broken / "meta.json").read_text(), "not json")
 
+    def test_session_about_writes_its_own_directory(self):
+        sessions = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions"
+        meta_path = sessions / "cart-rework" / "meta.json"
+        meta_path.parent.mkdir(parents=True)
+        meta_path.write_text(json.dumps({"name": "other", "about": "old", "owner_pane": "w3:p1"}))
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        rc, out = self.nakama("session", "about", "new", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(meta_path.read_text())["about"], "new")
+        self.assertFalse((sessions / "other").exists())
+
     def test_takeover_help_listed(self):
         self.assertIn("adopt a named session", self.help_text())
-        self.assertIn("about", self.help_text("session"))
+        self.assertIn("replace this session", self.help_text("session"))
 
 
 if __name__ == "__main__":
