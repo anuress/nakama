@@ -3283,6 +3283,19 @@ Broken role.
         self.assertEqual(rc, 2, out)
         self.assertTrue(out["error"].startswith("cannot write notes"), out)
 
+    def test_note_rejects_empty_and_multiline_text(self):
+        env = self.note_env()
+        notes = self.notes_path()
+        rc, out = self.nakama("note", "   ", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("empty", out["error"])
+        rc, out = self.nakama("note", "a\nb", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("one line", out["error"])
+        rc, out = self.nakama("note", "x\n## 2099-01-01", env=env)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(notes.exists())
+
     def test_note_help_listed(self):
         text = self.help_text()
         self.assertIn("append a timestamped line", text)
@@ -3290,12 +3303,14 @@ Broken role.
     def test_note_stores_text_verbatim(self):
         env = self.note_env()
         notes = self.notes_path()
-        text = "-x and \u2028 and \u00e9"
+        text = "-x and \u2028 and \u00e9 and \u2028## 2099-01-01"
         rc, out = self.nakama("note", "--", text, env=env)
         self.assertEqual(rc, 0, out)
         self.assertIn(text, notes.read_text())
         self.assertEqual(out["line"].split(" ", 2)[2], text)
-
+        rc, out = self.nakama("note", "same day", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(out["heading_added"])
 
     def test_brief_lists_only_this_sessions_workers(self):
         mine = self.launch()

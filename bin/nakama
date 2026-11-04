@@ -1494,14 +1494,20 @@ def cmd_note(a):
     key = session_key(current_session())
     if session_meta(key) is None:
         emit({"error": f"session {key} not named; run: nakama session start <name> --about \"<one line>\""}, 2)
+    text = digest_text(a.text).strip()
+    if not text:
+        emit({"error": "note text is empty"}, 2)
+    if "\n" in text or "\r" in text:
+        emit({"error": "note text must be one line"}, 2)
     path = session_dir(key) / "notes.md"
     now = time.localtime()
     day, stamp = time.strftime("%Y-%m-%d", now), time.strftime("%H:%M", now)
-    line = f"- {stamp} {digest_text(a.text)}"
+    line = f"- {stamp} {text}"
     try:
         existing = path.read_bytes().decode("utf-8", errors="replace") if path.is_file() else ""
-        # Only the last heading line counts; rstrip tolerates a hand-edited CRLF or trailing space.
-        headings = [l.rstrip() for l in existing.splitlines() if l.startswith("## ")]
+        # Only the last heading line counts, split on \n only: a note may hold U+2028,
+        # which splitlines() would split. rstrip tolerates a hand-edited CRLF or trailing space.
+        headings = [l.rstrip() for l in existing.split("\n") if l.startswith("## ")]
         heading_added = not headings or headings[-1] != f"## {day}"
         chunk = ""
         if existing and not existing.endswith("\n"):
@@ -1920,7 +1926,7 @@ def main():
     s = sub.add_parser("brief", help="read-only bearings for adopting this session: orchestrator, "
                                      "transcript, notes, workers, unread mail")
     s.add_argument("--closed", action="store_true", help="include closed workers")
-    s = sub.add_parser("note", help="append a timestamped line to session's handoff notes (notes.md)")
+    s = sub.add_parser("note", help="append a timestamped line to this session's handoff notes (notes.md)")
     s.add_argument("text", help="one line; quote it")
     s = sub.add_parser("digest", help="render this session's orchestrator transcript into a "
                                      "bounded markdown digest for a handoff to another agent kind")
