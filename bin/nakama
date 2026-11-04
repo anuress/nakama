@@ -1244,6 +1244,9 @@ def cmd_session_start(a):
                         f"try {session_key(a.name)}"}, 2)
     if SESSION_PANE_KEY_RE.fullmatch(a.name):
         emit({"error": f"session name {a.name} looks like a herdr pane key; pick another name"}, 2)
+    if a.name.casefold() == "default":
+        emit({"error": "session name default is reserved for the legacy bucket; "
+                       "pick another name"}, 2)
     about = a.about or ""
     if not about.strip():
         emit({"error": "--about is required: one line describing the session"}, 2)
@@ -1583,6 +1586,9 @@ def session_rm_classify(key):
     """A record is active (open or paused with a worktree), kept (an agent/* worktree stays) or dropped."""
     active, kept, dropped = [], [], []
     for rec in readable_records():
+        # The name decides a path rm unlinks: a record with ../ in it is left alone, not deleted.
+        if not SESSION_NAME_RE.fullmatch(rec["name"]):
+            continue
         if record_session(rec) != key:
             continue
         wt = record_worktree(rec)
@@ -1610,15 +1616,16 @@ def session_rm_kept(rec):
 
 
 def session_bytes(key):
-    """st_size of every regular file in the session dir; 0 when it cannot be walked."""
+    """st_size of every regular file in the session dir; any unreadable part makes the whole 0."""
+
+    def fail(exc):
+        raise exc  # os.walk swallows a listing error unless onerror re-raises it
+
     total = 0
     try:
-        for root, _dirs, files in os.walk(session_dir(key)):
+        for root, _dirs, files in os.walk(session_dir(key), onerror=fail):
             for name in files:
-                try:
-                    st = os.stat(os.path.join(root, name))
-                except OSError:
-                    continue
+                st = os.stat(os.path.join(root, name))
                 if stat.S_ISREG(st.st_mode):
                     total += st.st_size
     except OSError:
@@ -1636,11 +1643,13 @@ def session_note_files(key):
 
 
 def claimed_files(key, claims):
-    """Non-dot claim files naming key; [] when the dir is absent, which a preview must not create."""
+    """Non-dot claim files naming key; only a missing dir means none (a preview must not create it)."""
     try:
-        return [p for p in claims.iterdir() if not p.name.startswith(".") and claim_text(p) == key]
-    except OSError:
+        entries = list(claims.iterdir())
+    except FileNotFoundError:
         return []
+    # claim_text and the listing above raise anything else: a broken claim dir is rc 1, not silence.
+    return [p for p in entries if not p.name.startswith(".") and claim_text(p) == key]
 
 
 def session_rm_warnings(key, meta, alive, here, mode, notes, inbox, preview):
@@ -1666,10 +1675,10 @@ def session_rm_warnings(key, meta, alive, here, mode, notes, inbox, preview):
 
 def cmd_session_rm(a):
     require_herdr()
-    keys = session_keys()
-    if a.name == "default" and "default" not in keys:
+    if a.name.casefold() == "default":
         emit({"error": "default is the legacy bucket, not a named session; "
                        "see nakama session ls --legacy"}, 2)
+    keys = session_keys()
     if not SESSION_NAME_RE.fullmatch(a.name):
         emit({"error": "session name must be letters, numbers, underscores or hyphens"}, 2)
     # Directory names decide, not session_meta(name): a case-insensitive filesystem would open a twin.

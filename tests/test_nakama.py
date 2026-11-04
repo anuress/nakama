@@ -4121,6 +4121,55 @@ Broken role.
         self.assertEqual(rc, 2, out)
         self.assertIn("session ls", out["error"])
 
+    def test_session_rm_reserves_default_name(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        self.named_meta("default", "w9:p9")
+        rc, out = self.nakama("session", "rm", "default", "--yes")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("--legacy", out["error"])
+        self.assertTrue((state / "sessions" / "default").is_dir())
+
+    def test_session_rm_ignores_unsafe_record_names(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "evil.json").write_text(json.dumps(
+            {"name": "../victim", "session": "old-run", "closed": True,
+             "worktree": str(self.root)}))
+        victim = state.parent / "victim.json"
+        victim.write_text("keep")
+        self.named_meta("old-run", "w9:p9")
+        rc, out = self.nakama("session", "rm", "old-run", "--yes")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((state / "evil.json").is_file())
+        self.assertTrue(victim.is_file())
+
+    def test_session_rm_reports_unreadable_claim_dir_entry(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        self.named_meta("old-run", "w9:p9")
+        (state / "sessions" / ".by-pane" / "w9_p9").mkdir(parents=True)
+        rc, out = self.nakama("session", "rm", "old-run")
+        self.assertEqual(rc, 1, out)
+        self.assertTrue(out["error"].startswith("session rm failed"), out)
+
+    def test_session_rm_archive_rerun_keeps_both_inboxes(self):
+        state = Path(self.env["NAKAMA_STATE_DIR"])
+        self.named_meta("old-run", "w9:p9")
+        wt = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, wt, True)
+        self.pane_record("b1-k", "old-run", "w9:p9", closed=True, branch="agent/b1-k",
+                         worktree=str(wt))
+        crashed = state / "sessions" / "old-run" / "inbox"
+        crashed.mkdir(parents=True)
+        (crashed / "1.b1-k.info.md").write_text("old")
+        self.orch_mail("old-run")
+        rc, out = self.nakama("session", "rm", "old-run", "--yes")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["mode"], "archive")
+        archive = Path(out["archive"])
+        self.assertEqual((archive / "inbox" / "1.b1-k.info.md").read_text(), "old")
+        self.assertEqual(len(list((archive / "inbox-2").glob("*.md"))), 1)
+        self.assertFalse(self.orch_box("old-run").exists())
+
     def test_session_rm_clears_unreadable_meta(self):
         broken = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "bad"
         broken.mkdir(parents=True)
@@ -4164,9 +4213,9 @@ Broken role.
         rc, out = self.start_session("cart-rework")
         self.assertEqual(rc, 0, out)
         rc, out = self.start_session("default", env={**self.env, "HERDR_PANE_ID": "w3:p2"})
-        self.assertEqual(rc, 0, out)
-        rc, out = self.nakama("session", "rm", "default", "--yes")
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("reserved", out["error"])
+        self.assertFalse((state / "sessions" / "default").exists())
 
     def test_session_rm_help_listed(self):
         self.assertIn("remove a finished named session", self.help_text("session"))
