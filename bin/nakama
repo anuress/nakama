@@ -702,10 +702,14 @@ def refresh_session_agent(session):
     if token is None:
         return
     # Re-read under the lock: a takeover or `session about` may have saved since the caller looked.
-    with pane_claim_lock():
-        meta = session_meta(key)
-        if meta is not None:
-            save_session_meta({**meta, "agent": token})
+    try:
+        with pane_claim_lock():
+            meta = session_meta(key)
+            if meta is not None:
+                save_session_meta({**meta, "agent": token})
+    except OSError:
+        # Best effort: the refresh only feeds resume/digest, and the next launch retries it.
+        return
 
 
 def launcher_session():

@@ -3987,6 +3987,34 @@ Broken role.
         self.assertEqual(json.loads(meta_path.read_text())["about"], "new")
         self.assertFalse((sessions / "other").exists())
 
+    def test_launch_survives_unusable_claim_lock(self):
+        meta_path = self.named_meta("cart-rework", "w3:p1", agent=None)
+        self.set_state(status="idle",
+                       agent_session={"agent": "pi", "kind": "path", "value": "/t/s.jsonl"})
+        lock = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / ".by-pane" / ".lock"
+        lock.mkdir(parents=True)
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["name"], "b1-order-tip")
+        self.assertIsNone(json.loads(meta_path.read_text())["agent"])
+
+    def test_takeover_and_about_report_lock_failure_as_json(self):
+        meta_path = self.named_meta("cart-rework", "w3:p1")
+        self.set_state(statuses={"w3:p2": "idle"})
+        before = meta_path.read_bytes()
+        lock = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / ".by-pane" / ".lock"
+        lock.mkdir(parents=True)
+        rc, err = self.takeover("cart-rework")
+        self.assertEqual(rc, 1, err)
+        self.assertTrue(err["error"].startswith("takeover failed"), err)
+        self.assertEqual(meta_path.read_bytes(), before)
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        rc, err = self.nakama("session", "about", "x", env=env)
+        self.assertEqual(rc, 1, err)
+        self.assertTrue(err["error"].startswith("session about failed"), err)
+        self.assertEqual(meta_path.read_bytes(), before)
+
     def test_takeover_help_listed(self):
         self.assertIn("adopt a named session", self.help_text())
         self.assertIn("replace this session", self.help_text("session"))
