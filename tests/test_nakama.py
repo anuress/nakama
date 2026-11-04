@@ -3610,6 +3610,65 @@ Broken role.
         self.assertIn(str(digest_path), out["error"])
         self.assertEqual(sorted(p.name for p in session.iterdir()), ["meta.json"])
 
+    def test_digest_sanitises_lone_surrogates(self):
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t1", "message": {"role": "user",
+             "content": [{"type": "text", "text": "bad \ud83d prompt"}]}},
+            {"type": "message", "timestamp": "t2", "message": {"role": "toolResult",
+             "toolName": "bash", "content": [{"type": "text", "text": "tool \ud83d out"}]}},
+        ])
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["messages"], 2)
+        self.assertIn("bad ", out["text"])
+        self.assertIn("prompt", out["text"])
+        self.assertIn("out", out["text"])
+        self.assertEqual(out["bytes"], len(out["text"].encode()))
+
+    def test_digest_truncates_long_header_without_messages(self):
+        deep = self.root
+        for _ in range(8):
+            deep = deep / ("d" * 100)
+        deep.mkdir(parents=True)
+        path = deep / "pi.jsonl"
+        path.write_text("")
+        self.assertGreater(len(str(path)), 700)
+        name = "c" * 200  # a long key pushes the header past --max-bytes on its own
+        rc, out = self.digest("--stdout", "--max-bytes", "1024", "--grep", "absent",
+                              env=self.pi_meta(name, path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["messages"], 0)
+        self.assertTrue(out["truncated"])
+        self.assertLessEqual(out["bytes"], 1024)
+        self.assertEqual(out["bytes"], len(out["text"].encode()))
+
+    def test_digest_rejects_pathological_regex(self):
+        path = self.write_jsonl(self.root / "pi.jsonl", [
+            {"type": "message", "timestamp": "t", "message": {"role": "user",
+             "content": [{"type": "text", "text": "a"}]}}])
+        rc, out = self.digest("--stdout", "--grep", "a{99999999999}",
+                              env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("error", out)
+        rc, out = self.digest("--stdout", "--grep", "a{99999999999}")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("error", out)
+
+    def test_digest_skips_deeply_nested_line(self):
+        path = self.root / "pi.jsonl"
+        good = json.dumps({"type": "message", "timestamp": "t", "message": {
+            "role": "user", "content": [{"type": "text", "text": "good"}]}}).encode()
+        path.write_bytes(good + b"\n" + b"[" * 100000 + b"\n")
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["messages"], 1)
+        self.assertIn("good", out["text"])
+
+    def test_digest_pi_path_with_nul_names_path(self):
+        path = str(self.root / "bad\x00.jsonl")
+        rc, out = self.digest("--stdout", env=self.pi_meta("cart-rework", path))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("bad\x00.jsonl", out["error"])
 
 
 if __name__ == "__main__":

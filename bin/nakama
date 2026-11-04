@@ -1492,6 +1492,11 @@ def digest_cut(text, limit):
     return text[:limit] + "…" if len(text) > limit else text
 
 
+def digest_text(value):
+    # A transcript may hold a lone UTF-16 surrogate; no later strict UTF-8 encode accepts it.
+    return value.encode("utf-8", "replace").decode("utf-8")
+
+
 def digest_result_text(content):
     if isinstance(content, str):
         return content
@@ -1583,15 +1588,17 @@ def digest_body(role, blocks):
     return body if len(data) <= 1536 else data[:1536].decode("utf-8", "ignore") + " … [cut]"
 
 
-def digest_document(key, transcript, agent, msgs, matched, total, dropped, max_bytes):
-    lines = [f"# Digest: {key}", "", f"Transcript: {transcript} ({agent})",
-             f"Messages: {len(msgs)} of {matched} matched, {total} total"]
+def digest_head(key, transcript, agent, shown, matched, total, dropped, max_bytes):
+    head = (f"# Digest: {key}\n\nTranscript: {transcript} ({agent})\n"
+            f"Messages: {shown} of {matched} matched, {total} total")
     if dropped:
-        lines.append(f"… {dropped} older messages dropped to fit {max_bytes} bytes")
-    if msgs:
-        rendered = [f"### {role} · {ts}\n\n{digest_body(role, blocks)}" for role, ts, blocks in msgs]
-        lines.extend(["", "\n\n".join(rendered)])
-    return "\n".join(lines)
+        head += f"\n… {dropped} older messages dropped to fit {max_bytes} bytes"
+    return head
+
+
+def digest_document(key, transcript, agent, rendered, matched, total, dropped, max_bytes):
+    head = digest_head(key, transcript, agent, len(rendered), matched, total, dropped, max_bytes)
+    return head + ("\n\n" + "\n\n".join(rendered) if rendered else "")
 
 
 def digest_truncate(document, max_bytes):
@@ -1628,7 +1635,7 @@ def cmd_digest(a):
         emit({"error": "--max-bytes must be at least 1024"}, 2)
     try:
         pattern = re.compile(a.grep, re.I) if a.grep is not None else None
-    except re.error as e:
+    except (re.error, OverflowError) as e:
         emit({"error": f"invalid --grep pattern: {e}"}, 2)
 
     key = session_key(current_session())
@@ -1656,20 +1663,23 @@ def cmd_digest(a):
 
     try:
         data = transcript.read_bytes()
-    except OSError as e:
+    except (OSError, ValueError) as e:
         emit({"error": f"cannot read transcript {transcript}: {e}"}, 2)
     normalise = digest_pi_message if agent == "pi" else digest_claude_message
     messages = []
     for raw in data.split(b"\n"):
         try:
             line = json.loads(raw.decode("utf-8"))
-        except ValueError:
-            continue  # a live transcript may end mid-write, even mid-character
+        except (ValueError, RecursionError):
+            # A live transcript may end mid-write, even mid-character; a deeply nested
+            # line overflows json.loads before it can be called malformed.
+            continue
         if not isinstance(line, dict):
             continue
         entry = normalise(line)
         if entry is not None:
-            messages.append(entry)
+            role, ts, blocks = entry
+            messages.append((role, digest_text(ts), [digest_text(block) for block in blocks]))
 
     total = len(messages)
     selected = messages
@@ -1678,20 +1688,27 @@ def cmd_digest(a):
     matched = len(selected)
     selected = selected[-a.tail:]
 
-    dropped = 0
-    document = digest_document(key, transcript, agent, selected, matched, total, dropped, a.max_bytes)
-    while len(selected) > 1 and len(document.encode()) > a.max_bytes:
-        selected = selected[1:]
+    rendered = [f"### {role} · {ts}\n\n{digest_body(role, blocks)}" for role, ts, blocks in selected]
+    sizes = [len(item.encode()) for item in rendered]
+    shown, start, dropped = len(rendered), 0, 0
+    body_bytes = sum(sizes) + 2 * (shown - 1) if shown else 0
+    while shown > 1:
+        head = digest_head(key, transcript, agent, shown, matched, total, dropped, a.max_bytes)
+        if len(head.encode()) + 2 + body_bytes <= a.max_bytes:
+            break
+        body_bytes -= sizes[start] + 2
+        start += 1
+        shown -= 1
         dropped += 1
-        document = digest_document(key, transcript, agent, selected, matched, total, dropped, a.max_bytes)
+    document = digest_document(key, transcript, agent, rendered[start:], matched, total, dropped, a.max_bytes)
     truncated = False
-    if selected and len(document.encode()) > a.max_bytes:
+    if len(document.encode()) > a.max_bytes:
         document = digest_truncate(document, a.max_bytes)
         truncated = True
 
     digest_path = session_dir(key) / "digest.md"
     out = {"session": key, "transcript": str(transcript), "agent": agent,
-           "messages": len(selected), "matched": matched, "total": total,
+           "messages": shown, "matched": matched, "total": total,
            "bytes": len(document.encode()), "dropped": dropped, "truncated": truncated}
     if a.stdout:
         emit({**out, "path": None, "text": document})
