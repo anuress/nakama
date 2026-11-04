@@ -1589,7 +1589,7 @@ def digest_body(role, blocks):
 
 
 def digest_head(key, transcript, agent, shown, matched, total, dropped, max_bytes):
-    head = (f"# Digest: {key}\n\nTranscript: {transcript} ({agent})\n"
+    head = (f"# Digest: {key}\n\nTranscript: {digest_text(str(transcript))} ({agent})\n"
             f"Messages: {shown} of {matched} matched, {total} total")
     if dropped:
         head += f"\n… {dropped} older messages dropped to fit {max_bytes} bytes"

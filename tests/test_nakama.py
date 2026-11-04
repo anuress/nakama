@@ -3670,6 +3670,16 @@ Broken role.
         self.assertEqual(rc, 2, out)
         self.assertIn("bad\x00.jsonl", out["error"])
 
+    def test_digest_head_sanitises_surrogate_transcript_path(self):
+        loader = importlib.machinery.SourceFileLoader("nakama_digest_head", str(NAKAMA))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        nakama = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, self.env):
+            loader.exec_module(nakama)
+        head = nakama.digest_head("k", "/x/\udcff.jsonl", "pi", 0, 0, 0, 0, 1024)
+        head.encode()  # a lone surrogate in the path must not reach a strict encode
+        self.assertIn("/x/", head)
+
 
 if __name__ == "__main__":
     unittest.main()
