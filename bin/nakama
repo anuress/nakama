@@ -1404,6 +1404,163 @@ def cmd_session_ls(a):
     emit({"sessions": rows, "unnamed": unnamed})
 
 
+def cmd_takeover(a):
+    require_herdr()
+    if not SESSION_NAME_RE.fullmatch(a.name):
+        emit({"error": "session name must be letters, numbers, underscores or hyphens"}, 2)
+    here = os.environ.get("HERDR_PANE_ID")
+    if not here:
+        emit({"error": "no HERDR_PANE_ID: takeover must run inside a herdr pane"}, 2)
+    # Directory names decide, not session_meta(name): a case-insensitive filesystem would open a twin.
+    keys = session_keys()
+    if a.name in keys:
+        key = a.name
+    else:
+        variant = next((k for k in keys if k.casefold() == a.name.casefold()), None)
+        if variant is not None:
+            emit({"error": f"no session {a.name}; did you mean {variant}?",
+                  "did_you_mean": variant}, 2)
+        emit({"error": f"no session {a.name}; run nakama session ls"}, 2)
+    if session_meta(key) is None:
+        emit({"error": f"session {key} has an unreadable meta.json"}, 2)
+    # Both before the lock: they call herdr, which must not run while others wait for the claims.
+    terminal = pane_terminal(here)
+    here_token = pane_agent_session(here)
+    claims = STATE_DIR / "sessions" / ".by-pane"
+    claims.mkdir(parents=True, exist_ok=True)
+    claim = claims / session_key(here)
+    lock_fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            meta = session_meta(key)
+            if meta is None:
+                emit({"error": f"session {key} has an unreadable meta.json"}, 2)
+            old = meta.get("owner_pane")
+            for other, other_meta in sessions_on_disk().items():
+                if other != key and session_owned_by_pane(other_meta, here, terminal):
+                    emit({"error": f"this pane already owns session {other} "
+                                   f"({other_meta.get('about')}); take over from another pane",
+                          "session": other}, 2)
+            try:
+                held = claim.read_bytes().decode("ascii", errors="replace").strip()
+            except FileNotFoundError:
+                held = ""
+            if held != key and SESSION_NAME_RE.fullmatch(held):
+                held_meta = session_meta(held)
+                if session_owned_by_pane(held_meta, here, terminal):
+                    emit({"error": f"this pane already owns session {held} "
+                                   f"({held_meta.get('about')}); take over from another pane",
+                          "session": held}, 2)
+            already_owner = session_owned_by_pane(meta, here, terminal)
+            if not already_owner:
+                # Meta first: a crash after it still leaves the session here, and a re-run finishes a-c.
+                adoptions = meta.get("adoptions")
+                now = time.time()
+                try:
+                    save_session_meta({**meta, "name": key, "owner_pane": here,
+                                       "owner_terminal": terminal, "last_seen": now,
+                                       "adoptions": (adoptions if isinstance(adoptions, list) else [])
+                                       + [{"pane": here, "from": old, "at": now,
+                                           "agent": meta.get("agent")}]})
+                    owner_bytes = key.encode("ascii")
+                    fd = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                    try:
+                        if os.write(fd, owner_bytes) != len(owner_bytes):
+                            raise OSError("short write to pane claim")
+                    finally:
+                        os.close(fd)
+                    if old and old != here:
+                        stale = claims / session_key(old)
+                        try:
+                            stale_text = stale.read_bytes().decode("ascii", errors="replace").strip()
+                        except FileNotFoundError:
+                            stale_text = None
+                        if stale_text == key:
+                            stale.unlink(missing_ok=True)
+                except OSError as exc:
+                    emit({"error": f"takeover failed: {exc}"}, 1)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+    # meta still holds the pre-save token: the adoption entry copies it, the next launch replaces it.
+    old_agent = pane_agent(old) if old else None
+    alive, _ = session_liveness(meta, old_agent)
+    maybe_alive = alive and old != here
+    # On both paths, so a re-run after a crash between the meta write and here repoints the rest.
+    repointed = 0
+    skipped = []
+    for rec in readable_records():
+        if not rec.get("session") or record_session(rec) != key or rec.get("orch_pane") == here:
+            continue
+        try:
+            rec2 = json.loads(record_path(rec["name"]).read_text())
+        except (OSError, ValueError):
+            skipped.append(rec["name"])
+            continue
+        if not isinstance(rec2, dict):
+            skipped.append(rec["name"])
+            continue
+        rec2["orch_pane"] = here
+        save(rec2)
+        repointed += 1
+    token = meta.get("agent")
+    transcript = None
+    if isinstance(token, dict):
+        transcript = {"agent": token.get("agent"), "kind": token.get("kind"),
+                      "value": token.get("value"), "resume_with": resume_command(token),
+                      "cross_kind": (None if here_token is None
+                                     else here_token["agent"] != token.get("agent"))}
+    warnings = []
+    if maybe_alive:
+        warnings.append(f"old_orchestrator_surface_may_be_alive ({old})")
+    env_session = os.environ.get("NAKAMA_SESSION")
+    if env_session and session_key(env_session) != key:
+        warnings.append(f"nakama_session_env_points_elsewhere ({env_session})")
+    if skipped:
+        warnings.append("skipped_records")
+    emit({"name": key, "about": meta.get("about"), "already_owner": already_owner,
+          "previous_pane": old, "export": f"export NAKAMA_SESSION={key}",
+          "repointed": repointed, "skipped": skipped, "transcript": transcript,
+          "orchestrator": {"pane": old, "maybe_alive": maybe_alive,
+                           "close_with": f"herdr pane close {old}" if maybe_alive else None},
+          "warnings": warnings, "next": "nakama brief"})
+
+
+def cmd_session_about(a):
+    require_herdr()
+    key = session_key(current_session())
+    text = a.text
+    if not text.strip():
+        emit({"error": "about is required: one line describing the session"}, 2)
+    if "\n" in text or "\r" in text:
+        emit({"error": "about must be a single line"}, 2)
+    if len(text) > SESSION_ABOUT_MAX:
+        emit({"error": f"about must be at most {SESSION_ABOUT_MAX} characters"}, 2)
+    claims = STATE_DIR / "sessions" / ".by-pane"
+    claims.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(claims / ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        # Same lock as takeover: a concurrent adoption must not resurrect the old description.
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            meta = session_meta(key)
+            if meta is None:
+                if session_dir(key).is_dir():
+                    emit({"error": f"session {key} has an unreadable meta.json"}, 2)
+                emit({"error": f"session {key} is not named; run: nakama session start <name> "
+                               f"--about \"...\""}, 2)
+            previous = meta.get("about")
+            save_session_meta({**meta, "name": meta.get("name") or key, "about": text,
+                               "last_seen": time.time()})
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+    emit({"name": key, "about": text, "previous": previous})
+
+
 def worker_mail(rec):
     box = agent_dir(rec) / "inbox"
     files = sorted(box.glob("*.md")) if box.is_dir() else []
@@ -1755,7 +1912,8 @@ def cmd_digest(a):
 
 
 def cmd_session(a):
-    {"start": cmd_session_start, "ls": cmd_session_ls}[a.session_action](a)
+    {"start": cmd_session_start, "ls": cmd_session_ls,
+     "about": cmd_session_about}[a.session_action](a)
 
 
 def cmd_roles(a):
@@ -1923,6 +2081,11 @@ def main():
                                    "workers, notes and unread mail.")
     sl.add_argument("--legacy", action="store_true",
                     help="also list unnamed pane-id sessions and the default bucket")
+    sa = ss.add_parser("about", help="replace this session's one-line description")
+    sa.add_argument("text", help="one line")
+    s = sub.add_parser("takeover", help="adopt a named session in this pane: rebind it, repoint "
+                                        "its workers' pokes, print the resume command")
+    s.add_argument("name", help="session name: letters, numbers, underscores or hyphens")
     s = sub.add_parser("brief", help="read-only bearings for adopting this session: orchestrator, "
                                      "transcript, notes, workers, unread mail")
     s.add_argument("--closed", action="store_true", help="include closed workers")
@@ -1950,7 +2113,7 @@ def main():
     a = p.parse_args()
     {"launch": cmd_launch, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
      "pause": cmd_pause, "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
-     "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "brief": cmd_brief,
+     "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "takeover": cmd_takeover, "brief": cmd_brief,
      "note": cmd_note,
      "digest": cmd_digest}[a.cmd](a)
 

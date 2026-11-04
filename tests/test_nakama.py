@@ -3788,5 +3788,196 @@ Broken role.
         self.assertIn("/x/", head)
 
 
+    def claim_file(self, pane_key):
+        path = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / ".by-pane" / pane_key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def takeover(self, name, env=None):
+        return self.nakama("takeover", name, env=env or {**self.env, "HERDR_PANE_ID": "w3:p2"})
+
+    def test_takeover_binds_pane_and_repoints_records(self):
+        token = {"agent": "pi", "kind": "path", "value": "/t/s.jsonl"}
+        meta_path = self.named_meta("cart-rework", "w3:p1", agent=token)
+        self.pane_record("b1-a", "cart-rework", "w3:p1")
+        self.pane_record("b1-b", "cart-rework", "w3:p1", closed=True)
+        self.pane_record("b1-other", "other", "w3:p1")
+        self.pane_record("b1-legacy", None, "w3:p1")
+        untouched = {name: self.record_bytes(name) for name in ("b1-other", "b1-legacy")}
+        self.set_state(statuses={"w3:p2": "idle"})
+        env = {**self.env, "HERDR_PANE_ID": "w3:p2"}
+        rc, out = self.nakama("takeover", "cart-rework", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(out["already_owner"])
+        self.assertEqual(out["previous_pane"], "w3:p1")
+        self.assertEqual((out["repointed"], out["skipped"]), (2, []))
+        self.assertEqual(self.record("b1-a")["orch_pane"], "w3:p2")
+        self.assertEqual(self.record("b1-b")["orch_pane"], "w3:p2")
+        for name, before in untouched.items():
+            self.assertEqual(self.record_bytes(name), before, name)
+        meta = json.loads(meta_path.read_text())
+        self.assertEqual(meta["owner_pane"], "w3:p2")
+        self.assertEqual(meta["agent"], token)
+        adoption = meta["adoptions"][-1]
+        self.assertEqual((adoption["pane"], adoption["from"], adoption["agent"]),
+                         ("w3:p2", "w3:p1", token))
+        self.assertIsInstance(adoption["at"], float)
+        self.assertEqual(self.claim_file("w3_p2").read_text(), "cart-rework")
+        self.assertEqual(out["export"], "export NAKAMA_SESSION=cart-rework")
+        self.assertEqual(out["next"], "nakama brief")
+        self.assertEqual(out["transcript"]["resume_with"], "pi --session /t/s.jsonl")
+        self.assertEqual(out["orchestrator"], {"pane": "w3:p1", "maybe_alive": False,
+                                                "close_with": None})
+        self.assertEqual(out["warnings"], [])
+        rc, brief = self.nakama("brief", env=env)
+        self.assertEqual(rc, 0, brief)
+        self.assertEqual((brief["session"]["name"], brief["session"]["source"]),
+                         ("cart-rework", "pane"))
+
+    def record_bytes(self, name):
+        return (self.root / "records" / f"{name}.json").read_bytes()
+
+    def test_takeover_warns_when_old_pane_alive(self):
+        self.named_meta("cart-rework", "w3:p1", agent=None)
+        self.set_state(status="idle")
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(out["transcript"])
+        self.assertEqual(out["orchestrator"], {"pane": "w3:p1", "maybe_alive": True,
+                                                "close_with": "herdr pane close w3:p1"})
+        self.assertIn("old_orchestrator_surface_may_be_alive (w3:p1)", out["warnings"])
+
+    def test_takeover_removes_old_claim_only_if_it_is_ours(self):
+        self.set_state(statuses={"w3:p2": "idle"})
+        self.named_meta("cart-rework", "w3:p1")
+        self.claim_file("w3_p1").write_text("cart-rework")
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(self.claim_file("w3_p1").exists())
+
+        shutil.rmtree(Path(self.env["NAKAMA_STATE_DIR"]) / "sessions")
+        self.named_meta("cart-rework", "w3:p1")
+        self.claim_file("w3_p1").write_text("other")
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.claim_file("w3_p1").read_text(), "other")
+
+    def test_takeover_already_owner_writes_nothing(self):
+        meta_path = self.named_meta("cart-rework", "w3:p1")
+        self.pane_record("b1-a", "cart-rework", "w3:p1")
+        self.set_state(statuses={"w3:p2": "idle"})
+        rc, first = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, first)
+        meta_before = meta_path.read_bytes()
+        record_before = self.record_bytes("b1-a")
+        rc, second = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, second)
+        self.assertTrue(second["already_owner"])
+        self.assertEqual(second["repointed"], 0)
+        self.assertEqual(sorted(second), sorted(first))
+        self.assertEqual(meta_path.read_bytes(), meta_before)
+        self.assertEqual(self.record_bytes("b1-a"), record_before)
+
+    def test_takeover_already_owner_finishes_repoint(self):
+        meta_path = self.named_meta("cart-rework", "w3:p2")
+        self.pane_record("b1-a", "cart-rework", "w3:p1")
+        self.set_state(statuses={"w3:p2": "idle"})
+        meta_before = meta_path.read_bytes()
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["already_owner"])
+        self.assertEqual(out["repointed"], 1)
+        self.assertEqual(self.record("b1-a")["orch_pane"], "w3:p2")
+        self.assertEqual(meta_path.read_bytes(), meta_before)
+
+    def test_takeover_refuses_unknown_case_variant_and_bad_input(self):
+        self.set_state(statuses={"w3:p2": "idle"})
+        rc, err = self.takeover("nope")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("session ls", err["error"])
+        meta_path = self.named_meta("Cart-Rework", "w3:p1")
+        before = meta_path.read_bytes()
+        rc, err = self.takeover("cart-rework")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["did_you_mean"], "Cart-Rework")
+        self.assertEqual(meta_path.read_bytes(), before)
+        self.assertEqual(self.takeover("a b")[0], 2)
+        no_pane = {k: v for k, v in self.env.items() if k != "HERDR_PANE_ID"}
+        rc, err = self.nakama("takeover", "Cart-Rework", env=no_pane)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("HERDR_PANE_ID", err["error"])
+
+    def test_takeover_refuses_pane_that_owns_another_session(self):
+        self.set_state(statuses={"w3:p2": "idle"})
+        meta_path = self.named_meta("cart-rework", "w3:p1")
+        before = meta_path.read_bytes()
+        self.named_meta("mine", "w3:p2", about="my own run")
+        rc, err = self.takeover("cart-rework")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["session"], "mine")
+        self.assertIn("my own run", err["error"])
+        self.assertEqual(meta_path.read_bytes(), before)
+
+        shutil.rmtree(Path(self.env["NAKAMA_STATE_DIR"]) / "sessions")
+        meta_path = self.named_meta("cart-rework", "w3:p1")
+        before = meta_path.read_bytes()
+        self.named_meta("mine", "w3:p2", about="claim only")
+        self.claim_file("w3_p2").write_text("mine")
+        rc, err = self.takeover("cart-rework")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(err["session"], "mine")
+        self.assertEqual(meta_path.read_bytes(), before)
+
+    def test_takeover_cross_kind_and_env_warning(self):
+        self.named_meta("cart-rework", "w3:p1",
+                        agent={"agent": "claude", "kind": "id", "value": "abc-123"})
+        self.set_state(statuses={"w3:p2": "idle"},
+                       agent_session={"agent": "pi", "kind": "path", "value": "/t/s.jsonl"})
+        rc, out = self.takeover("cart-rework")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["transcript"]["cross_kind"])
+        self.assertEqual(out["transcript"]["resume_with"], "claude --resume abc-123")
+        env = {**self.env, "HERDR_PANE_ID": "w3:p2", "NAKAMA_SESSION": "elsewhere"}
+        rc, out = self.takeover("cart-rework", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("nakama_session_env_points_elsewhere (elsewhere)", out["warnings"])
+
+    def test_session_about_updates_description(self):
+        meta_path = self.named_meta("cart-rework", "w3:p1", about="old line")
+        before = json.loads(meta_path.read_text())
+        env = {**self.env, "NAKAMA_SESSION": "cart-rework"}
+        rc, out = self.nakama("session", "about", "new line", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["name"], out["about"], out["previous"]),
+                         ("cart-rework", "new line", "old line"))
+        meta = json.loads(meta_path.read_text())
+        self.assertEqual(sorted(meta), sorted(before))
+        self.assertEqual(meta["about"], "new line")
+        for key in before:
+            if key not in ("about", "last_seen"):
+                self.assertEqual(meta[key], before[key], key)
+        unchanged = meta_path.read_bytes()
+        for text in ("", "   ", "one\ntwo", "x" * 201):
+            rc, err = self.nakama("session", "about", text, env=env)
+            self.assertEqual(rc, 2, err)
+            self.assertIn("about", err["error"])
+            self.assertEqual(meta_path.read_bytes(), unchanged)
+        rc, err = self.nakama("session", "about", "x", env={**self.env, "HERDR_PANE_ID": "w3:p9"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("session start", err["error"])
+        broken = Path(self.env["NAKAMA_STATE_DIR"]) / "sessions" / "broken"
+        broken.mkdir(parents=True)
+        (broken / "meta.json").write_text("not json")
+        rc, err = self.nakama("session", "about", "x",
+                              env={**self.env, "NAKAMA_SESSION": "broken"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("unreadable", err["error"])
+        self.assertEqual((broken / "meta.json").read_text(), "not json")
+
+    def test_takeover_help_listed(self):
+        self.assertIn("adopt a named session", self.help_text())
+        self.assertIn("about", self.help_text("session"))
+
+
 if __name__ == "__main__":
     unittest.main()
