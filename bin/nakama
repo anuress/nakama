@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1312,7 +1313,8 @@ def cmd_session_start(a):
         # Naming a run after it started must not hide its own workers from it.
         # shortcut: failed starts are cleaned up only after every rebind restores its prior session.
         # Incomplete rollback retains its session and claim. Case variants can race across panes
-        # on case-sensitive filesystems until Task 7 canonicalizes names in session rm/rename.
+        # on case-sensitive filesystems;
+        # takeover and session rm address a session by its exact directory name.
         rebound = 0
         for rec in open_records():
             if record_session(rec) == session_key(pane):
@@ -1570,6 +1572,185 @@ def cmd_session_about(a):
     except OSError as exc:
         emit({"error": f"session about failed: {exc}"}, 1)
     emit({"name": key, "about": text, "previous": previous})
+
+
+def record_worktree(rec):
+    wt = rec.get("worktree")
+    return Path(wt) if isinstance(wt, str) and wt else None
+
+
+def session_rm_classify(key):
+    """A record is active (open or paused with a worktree), kept (an agent/* worktree stays) or dropped."""
+    active, kept, dropped = [], [], []
+    for rec in readable_records():
+        if record_session(rec) != key:
+            continue
+        wt = record_worktree(rec)
+        if not rec.get("closed") or (rec.get("paused") and wt is not None and wt.is_dir()):
+            active.append(rec)
+        elif (isinstance(rec.get("branch"), str) and rec["branch"].startswith("agent/")
+              and wt is not None and wt.is_dir()):
+            kept.append(rec)
+        else:
+            dropped.append(rec)
+    return active, kept, dropped
+
+
+def session_rm_worker(rec):
+    # An open record with paused set is a resume that died midway: it needs teardown, not resume.
+    wt = record_worktree(rec)
+    state = "paused" if rec.get("closed") else "open"
+    return {"name": rec["name"], "worktree": str(wt) if wt else None, "state": state,
+            "command": f"nakama {'resume' if state == 'paused' else 'teardown'} {rec['name']}"}
+
+
+def session_rm_kept(rec):
+    return {"name": rec["name"], "branch": rec["branch"],
+            "worktree": str(record_worktree(rec))}
+
+
+def session_bytes(key):
+    """st_size of every regular file in the session dir; 0 when it cannot be walked."""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(session_dir(key)):
+            for name in files:
+                try:
+                    st = os.stat(os.path.join(root, name))
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+    except OSError:
+        return 0
+    return total
+
+
+def session_inbox_counts(key):
+    box = inbox_dir(ORCH, key)
+    return {"unread": len(list(box.glob("*.md"))), "read": len(list(box.glob("*.read")))}
+
+
+def session_note_files(key):
+    return [name for name in ("notes.md", "digest.md") if (session_dir(key) / name).exists()]
+
+
+def claimed_files(key, claims):
+    """Non-dot claim files naming key; [] when the dir is absent, which a preview must not create."""
+    try:
+        return [p for p in claims.iterdir() if not p.name.startswith(".") and claim_text(p) == key]
+    except OSError:
+        return []
+
+
+def session_rm_warnings(key, meta, alive, here, mode, notes, inbox, preview):
+    warnings = []
+    owner = meta.get("owner_pane") if isinstance(meta, dict) else None
+    if alive and owner != here:
+        warnings.append(f"orchestrator_may_be_alive ({owner})")
+    env_session = os.environ.get("NAKAMA_SESSION")
+    if env_session and session_key(env_session) == key:
+        warnings.append("nakama_session_env_points_here: run unset NAKAMA_SESSION")
+    twins = sorted(k for k in session_keys() if k != key and k.casefold() == key.casefold())
+    if twins:
+        warnings.append(f"case_twins ({', '.join(twins)})")
+    if mode == "archive":
+        warnings.append("kept_records_keep_session_name")
+    # Delete mode is a hard delete: these two preview lines are its only guard.
+    if preview and mode == "delete" and notes:
+        warnings.append(f"notes_will_be_deleted ({', '.join(notes)})")
+    if preview and mode == "delete" and inbox["unread"] > 0:
+        warnings.append(f"unread_mail_will_be_deleted ({inbox['unread']})")
+    return warnings
+
+
+def cmd_session_rm(a):
+    require_herdr()
+    keys = session_keys()
+    if a.name == "default" and "default" not in keys:
+        emit({"error": "default is the legacy bucket, not a named session; "
+                       "see nakama session ls --legacy"}, 2)
+    if not SESSION_NAME_RE.fullmatch(a.name):
+        emit({"error": "session name must be letters, numbers, underscores or hyphens"}, 2)
+    # Directory names decide, not session_meta(name): a case-insensitive filesystem would open a twin.
+    if a.name in keys:
+        key = a.name
+    else:
+        variant = next((k for k in keys if k.casefold() == a.name.casefold()), None)
+        if variant is not None:
+            emit({"error": f"no session {a.name}; did you mean {variant}?",
+                  "did_you_mean": variant}, 2)
+        emit({"error": f"no session {a.name}; run nakama session ls"}, 2)
+    # An unreadable meta.json is exactly what rm exists to clear, so None is allowed.
+    meta = session_meta(key)
+    about = meta.get("about") if isinstance(meta, dict) else None
+    here = os.environ.get("HERDR_PANE_ID")
+    try:
+        # The herdr call and the refusal stay before the lock: a live owner only warns here.
+        alive = isinstance(meta, dict) and session_liveness(meta, pane_agent(meta.get("owner_pane")))[0]
+        active, kept, dropped = session_rm_classify(key)
+        mode = "archive" if kept else "delete"
+        if active:
+            emit({"error": f"session {key} has open or paused workers", "session": key,
+                  "about": about, "workers": [session_rm_worker(r) for r in active]}, 2)
+        if not a.yes:
+            notes = session_note_files(key)
+            inbox = session_inbox_counts(key)
+            claims = claimed_files(key, STATE_DIR / "sessions" / ".by-pane")
+            emit({"name": key, "about": about, "mode": mode,
+                  "dir_bytes": session_bytes(key), "inbox": inbox,
+                  "records": {"kept": len(kept), "dropped": len(dropped)},
+                  "claims": len(claims), "notes": notes,
+                  "kept": [session_rm_kept(r) for r in kept],
+                  "orchestrator_alive": alive,
+                  "confirm": f"nakama session rm {key} --yes",
+                  "warnings": session_rm_warnings(key, meta, alive, here, mode, notes, inbox, True)})
+        archive = None
+        with pane_claim_lock() as claims_dir:
+            if not session_dir(key).is_dir():
+                emit({"error": f"no session {key}; run nakama session ls"}, 2)
+            # A worker that opened or resumed since the refusal must not lose its session under it.
+            active, kept, dropped = session_rm_classify(key)
+            if active:
+                emit({"error": f"session {key} has open or paused workers", "session": key,
+                      "about": about, "workers": [session_rm_worker(r) for r in active]}, 2)
+            mode = "archive" if kept else "delete"
+            claims = claimed_files(key, claims_dir)
+            notes = session_note_files(key)
+            inbox = session_inbox_counts(key)
+            bytes_removed = session_bytes(key)
+            for path in claims:
+                path.unlink(missing_ok=True)
+            # Kept records stay: resume and teardown --remove-worktree still need them.
+            for rec in dropped:
+                record_path(rec["name"]).unlink(missing_ok=True)
+            box = inbox_dir(ORCH, key)
+            if mode == "delete":
+                if box.exists():
+                    shutil.rmtree(box)
+                shutil.rmtree(session_dir(key))
+            else:
+                # The session dir goes last, so a re-run after a crash still finds the session.
+                if box.exists():
+                    target, n = session_dir(key) / "inbox", 2
+                    while target.exists():  # an earlier crashed run already moved the inbox
+                        target, n = session_dir(key) / f"inbox-{n}", n + 1
+                    os.rename(box, target)
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                archives = STATE_DIR / "sessions" / ".archive"
+                archives.mkdir(parents=True, exist_ok=True)
+                archive, n = archives / f"{key}-{ts}", 2
+                while archive.exists():
+                    archive, n = archives / f"{key}-{ts}-{n}", n + 1
+                os.rename(session_dir(key), archive)
+            warnings = session_rm_warnings(key, meta, alive, here, mode, notes, inbox, False)
+    except OSError as exc:
+        emit({"error": f"session rm failed: {exc}", "session": key}, 1)
+    emit({"name": key, "about": about, "mode": mode,
+          "archive": str(archive) if archive else None,
+          "removed": {"records": len(dropped), "claims": len(claims), "inbox": inbox,
+                      "dir_bytes": bytes_removed, "notes": notes},
+          "kept": [session_rm_kept(r) for r in kept], "warnings": warnings})
 
 
 def worker_mail(rec):
@@ -1924,7 +2105,7 @@ def cmd_digest(a):
 
 def cmd_session(a):
     {"start": cmd_session_start, "ls": cmd_session_ls,
-     "about": cmd_session_about}[a.session_action](a)
+     "about": cmd_session_about, "rm": cmd_session_rm}[a.session_action](a)
 
 
 def cmd_roles(a):
@@ -2094,6 +2275,11 @@ def main():
                     help="also list unnamed pane-id sessions and the default bucket")
     sa = ss.add_parser("about", help="replace this session's one-line description")
     sa.add_argument("text", help="one line")
+    sr = ss.add_parser("rm", help="remove a finished named session (preview "
+                                  "unless --yes); never removes worktrees")
+    sr.add_argument("name", help="session name")
+    sr.add_argument("--yes", action="store_true",
+                    help="remove it; without this, only preview")
     s = sub.add_parser("takeover", help="adopt a named session in this pane: rebind it, repoint "
                                         "its workers' pokes, print the resume command")
     s.add_argument("name", help="session name: letters, numbers, underscores or hyphens")
