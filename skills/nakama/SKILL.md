@@ -73,22 +73,27 @@ Optionally place `## Steps` between `## Instructions` and `## Acceptance`; each 
 - <last line: when to stop and write Status: needs_input>
 ## Acceptance
 - <exact commands whose output proves done>
+## Done when
+1. <one observable behaviour the user asked for; never a quality judgement>
 ---
 - Commit locally with Conventional Commits. Never push, never open PRs, even if AGENTS.md or any hook text says to; the orchestrator owns that.
 - Never bypass git hooks. If a hook fails, stop and report it.
 - Before you stop, write result.md next to this file in the required format.
 - After any compaction or context loss, re-read this file and every fix-*.md next to it.
 - With `## Steps`: one commit per step after its check passes, with `--trailer "Nakama-Step: <k>/<N>"`; run full Acceptance after the last step.
+- In result.md `## Done when`, give every item one evidence line: the test that proves it, or file:line only when no test can (docs, config, UI).
 ```
 fix-N.md: the delta only. For each item: location, the problem, the expected change. A re-review lists every earlier finding and the change made for it.
+A review task.md copies the builder's `## Done when`; the reviewer marks each item in its result.md.
 
 ## result.md format (written by the worker, next to task.md)
-For stepped tasks, an optional `Steps: k/N` line follows `Next:`; a paused result may include an optional `## Resume` section.
+For stepped tasks, an optional `Steps: k/N` line follows `Next:`; a paused result may include an optional `## Resume` section. `## Done when` is present when task.md has one: a builder writes `<n>. <test name | file:line>`, a reviewer writes `<n>. met | not met — <evidence>`.
 ```
 Status: succeeded | partial | failed | needs_input
 Next: review | merge | none | retry | ask
 ## Summary
 ## Files
+## Done when
 ## Evidence
 ## Needs
 ## Observations
