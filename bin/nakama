@@ -27,6 +27,7 @@ PAUSE_SEC = 300
 USER_ROLES_DIR = Path(os.environ.get("NAKAMA_USER_ROLES_DIR", str(HOME / ".config/nakama/roles")))
 BUNDLED_ROLES_DIR = Path(os.environ.get("NAKAMA_ROLES_DIR", str(REPO_DIR / "roles")))
 MIN_HERDR = (0, 9, 3)
+MIN_HC = (0, 1, 19)
 
 MAX_ROUNDS = 2
 MAX_BUDGET_MIN = 180
@@ -45,6 +46,8 @@ SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SESSION_ABOUT_MAX = 200
 # What session_key() turns a herdr pane id (w3:p1) into: a name like that would share a legacy run's inbox.
 SESSION_PANE_KEY_RE = re.compile(r"^w[A-Za-z0-9]+_[A-Za-z0-9]+$")
+# The default session key of a Herdr app terminal (e.g. hc-t1-1794300123118): not a user session name.
+HC_SESSION_KEY_RE = re.compile(r"^hc-t[0-9a-z]+-[0-9]+$")
 # hc reports blocked and error alike: nakama treats an errored agent as blocked.
 HC_STATE_MAP = {"error": "blocked"}
 STATUS_VALUES = ("succeeded", "partial", "failed", "needs_input")
@@ -227,6 +230,16 @@ def require_backend():
         emit({"error": "not inside herdr or a Herdr app terminal (HERDR_ENV != 1 and no HC_TERMINAL_ID)"}, 2)
 
 
+def caller_pane():
+    """The pane (herdr) or terminal (hc) that runs this command: the orchestrator address on either backend."""
+    return os.environ.get("HC_TERMINAL_ID") if backend() == "hc" else os.environ.get("HERDR_PANE_ID")
+
+
+def refuse_named_session_on_hc():
+    if backend() == "hc":
+        emit({"error": "named sessions need the herdr TUI for now"}, 2)
+
+
 def record_path(name):
     return STATE_DIR / f"{name}.json"
 
@@ -369,6 +382,9 @@ def current_session_with_source():
     named = os.environ.get("NAKAMA_SESSION")
     if named:
         return named, "env"
+    if backend() == "hc":
+        # Named sessions need the herdr TUI, so a Herdr app terminal's default session is its own terminal.
+        return hc_session_key(), "pane_id"
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
         terminal = None
@@ -392,6 +408,10 @@ def current_session_with_source():
 
 def current_session():
     return current_session_with_source()[0]
+
+
+def hc_session_key():
+    return f"hc-{os.environ['HC_TERMINAL_ID']}-{hc_caller_info()['created_ms']}"
 
 
 def session_key(session):
@@ -804,7 +824,7 @@ def launcher_orch_pane():
     parent = os.environ.get("NAKAMA_AGENT")
     if parent and record_path(parent).is_file():
         return load(parent).get("orch_pane")
-    return os.environ.get("HERDR_PANE_ID")
+    return caller_pane()
 
 
 def refresh_session_agent(session):
@@ -1353,10 +1373,11 @@ def cmd_sweep(a):
 
 def cmd_session_start(a):
     require_backend()
+    refuse_named_session_on_hc()
     if not SESSION_NAME_RE.fullmatch(a.name):
         emit({"error": f"session name must be letters, numbers, underscores or hyphens; "
                         f"try {session_key(a.name)}"}, 2)
-    if SESSION_PANE_KEY_RE.fullmatch(a.name):
+    if SESSION_PANE_KEY_RE.fullmatch(a.name) or HC_SESSION_KEY_RE.fullmatch(a.name):
         emit({"error": f"session name {a.name} looks like a herdr pane key; pick another name"}, 2)
     if a.name.casefold() == "default":
         emit({"error": "session name default is reserved for the legacy bucket; "
@@ -1562,6 +1583,7 @@ def cmd_session_ls(a):
 
 def cmd_takeover(a):
     require_backend()
+    refuse_named_session_on_hc()
     if not SESSION_NAME_RE.fullmatch(a.name):
         emit({"error": "session name must be letters, numbers, underscores or hyphens"}, 2)
     here = os.environ.get("HERDR_PANE_ID")
@@ -1665,6 +1687,7 @@ def cmd_takeover(a):
 
 def cmd_session_about(a):
     require_backend()
+    refuse_named_session_on_hc()
     key = session_key(current_session())
     text = a.text
     if not text.strip():
@@ -1807,7 +1830,7 @@ def cmd_session_rm(a):
     # An unreadable meta.json is exactly what rm exists to clear, so None is allowed.
     meta = session_meta(key)
     about = meta.get("about") if isinstance(meta, dict) else None
-    here = os.environ.get("HERDR_PANE_ID")
+    here = caller_pane()
     try:
         # The herdr call and the refusal stay before the lock: a live owner only warns here.
         alive = isinstance(meta, dict) and session_liveness(meta, pane_agent(meta.get("owner_pane")))[0]
@@ -1897,7 +1920,7 @@ def cmd_brief(a):
     session, source = current_session_with_source()
     key = session_key(session)
     meta = session_meta(key)
-    here = os.environ.get("HERDR_PANE_ID")
+    here = caller_pane()
     now = time.time()
 
     notes_path = session_dir(key) / "notes.md"
@@ -2256,22 +2279,34 @@ def herdr_version():
     return tuple(int(x) for x in match.groups()) if match else None
 
 
+def hc_version():
+    if not shutil.which("hc"):
+        return None
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", run(["hc", "--version"], check=False).stdout)
+    return tuple(int(x) for x in match.groups()) if match else None
+
+
 def cmd_doctor(a):
     checks = []
 
     def check(name, ok, fix, level="error"):
         checks.append({"check": name, "ok": bool(ok), "level": level, "fix": None if ok else fix})
 
-    version = herdr_version()
-    check("herdr >= 0.9.3", version and version >= MIN_HERDR, "install or upgrade herdr: https://herdr.dev")
-    check("inside herdr", os.environ.get("HERDR_ENV") == "1", "run nakama from a herdr pane", "warn")
+    if backend() == "hc":
+        version = hc_version()
+        check("hc >= 0.1.19", version and version >= MIN_HC, "install or upgrade herdr-core (hc)")
+    else:
+        version = herdr_version()
+        check("herdr >= 0.9.3", version and version >= MIN_HERDR, "install or upgrade herdr: https://herdr.dev")
+    check("inside herdr", backend() is not None, "run nakama from a herdr pane", "warn")
     for tool in ("wt", "git"):
         check(f"{tool} on PATH", shutil.which(tool), f"install {tool}")
     check("pi or claude on PATH", shutil.which("pi") or shutil.which("claude"), "install pi and/or Claude Code")
-    if shutil.which("pi"):
+    # hc reads agent status natively, so the herdr integration checks only apply to the TUI.
+    if backend() != "hc" and shutil.which("pi"):
         check("herdr pi integration", (HOME / ".pi/agent/extensions/herdr-agent-state.ts").is_file(),
               "herdr integration install pi")
-    if shutil.which("claude"):
+    if backend() != "hc" and shutil.which("claude"):
         check("herdr claude integration", (HOME / ".claude/hooks/herdr-agent-state.sh").is_file(),
               "herdr integration install claude")
     check("nakama on PATH", shutil.which("nakama"),
