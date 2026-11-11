@@ -84,7 +84,8 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps(["wt"] + args) + "\n")
 if args[0] == "switch":
-    path = os.path.join(os.environ["FAKE_ROOT"], "wt-" + args[2].replace("/", "-"))
+    branch = args[2] if args[1] == "-c" else args[1]
+    path = os.path.join(os.environ["FAKE_ROOT"], "wt-" + branch.replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     print(json.dumps({"path": path}))
 elif args[0] == "remove":
@@ -94,7 +95,9 @@ elif args[0] == "remove":
         print(os.environ["FAKE_WT_REMOVE_STDOUT"])
     sys.exit(int(os.environ.get("FAKE_WT_REMOVE_RC", "0")))
 elif args[0] == "list":
-    print(json.dumps({"schema": 2, "items": [{"branch": "agent/b1-old"}, {"branch": "develop"}]}))
+    items = json.load(open(os.environ["FAKE_STATE"])).get("worktrees") or [
+        {"branch": "agent/b1-old"}, {"branch": "develop"}]
+    print(json.dumps({"schema": 2, "items": items}))
 '''
 
 FAKE_HC = r'''#!/usr/bin/env python3
@@ -140,13 +143,50 @@ else:
     sys.exit(2)
 '''
 
+FAKE_HERDR_APP = r'''#!/usr/bin/env python3
+import json, os, sys
+st_path = os.environ["FAKE_STATE"]
+st = json.load(open(st_path))
+app = st.setdefault("herdr_app", {})
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["herdr-app"] + args) + "\n")
+if args[0] == "ls":
+    print(json.dumps({"spaces": app.get("spaces", [])}))
+elif args[:2] in (["do", "space.select"], ["do", "space.new"]):
+    if app.get("rc"):
+        print(app.get("stderr", "herdr-app failed"), file=sys.stderr)
+        sys.exit(app["rc"])
+    if args[1] == "space.new":
+        want = json.loads(args[2])
+        app.setdefault("spaces", []).append({"id": "sp-new", "name": want["name"],
+                                            "folder": want["folder"], "machine": "local",
+                                            "active": False, "tabs": [want["tab"]]})
+        json.dump(st, open(st_path, "w"))
+else:
+    sys.exit(2)
+'''
+
+FAKE_GIT = r'''#!/usr/bin/env python3
+import json, os, sys
+st = json.load(open(os.environ["FAKE_STATE"]))
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["git"] + args) + "\n")
+if args[0] == "for-each-ref":
+    print("\n".join(st.get("refs", [])))
+else:
+    sys.exit(2)
+'''
+
 
 class NakamaTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         bin_dir = self.bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        for name, body in (("herdr", FAKE_HERDR), ("wt", FAKE_WT), ("hc", FAKE_HC)):
+        for name, body in (("herdr", FAKE_HERDR), ("wt", FAKE_WT), ("hc", FAKE_HC),
+                           ("herdr-app", FAKE_HERDR_APP)):
             path = bin_dir / name
             path.write_text(body)
             path.chmod(0o755)
@@ -4388,6 +4428,208 @@ class NakamaHcTest(unittest.TestCase):
         rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", env=env)
         self.assertEqual(rc, 0, out)
         return out
+
+
+class NakamaSpaceTest(unittest.TestCase):
+    """nakama space: one Herdr app space per ticket, an orchestrator in that ticket's worktree."""
+
+    # Borrowed helpers only, as NakamaHcTest does: subclassing would re-run NakamaTest's herdr tests.
+    set_state = NakamaTest.set_state
+    nakama = NakamaTest.nakama
+    calls = NakamaTest.calls
+
+    def setUp(self):
+        NakamaTest.setUp(self)
+        self.hc_log = self.root / "hc.jsonl"
+        self.hc_log.write_text("")
+        for name in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID"):
+            self.env.pop(name, None)
+        self.env.update({"HC_TERMINAL_ID": "t1", "FAKE_HC_LOG": str(self.hc_log)})
+        git = self.bin_dir / "git"
+        git.write_text(FAKE_GIT)
+        git.chmod(0o755)
+        self.set_refs("refs/heads/develop")
+
+    def set_refs(self, *refs):
+        self.state_update(refs=list(refs))
+
+    def set_spaces(self, *spaces):
+        self.state_update(herdr_app={"spaces": list(spaces)})
+
+    def set_worktrees(self, *items):
+        self.state_update(worktrees=list(items))
+
+    def set_app(self, **values):
+        self.state_update(herdr_app={"spaces": [], **values})
+
+    def state_update(self, **values):
+        self.set_state(**{**json.loads(self.state.read_text()), **values})
+
+    def space(self, *args, env=None):
+        return self.nakama("space", *args, env=env)
+
+    def app_calls(self):
+        return [c for c in self.calls() if c[0] == "herdr-app"]
+
+    def opened_space(self):
+        """The payloads this run sent to space.new."""
+        return [json.loads(c[3]) for c in self.app_calls() if c[1:3] == ["do", "space.new"]]
+
+    def selected(self):
+        return [json.loads(c[3])["id"] for c in self.app_calls() if c[1:3] == ["do", "space.select"]]
+
+    def wt_switch(self):
+        return [c for c in self.calls() if c[:2] == ["wt", "switch"]]
+
+    def wt_steps(self):
+        return [c for c in self.calls() if c[:2] == ["wt", "step"]]
+
+    def test_existing_space_is_focused_without_a_worktree_or_git(self):
+        self.set_spaces({"id": "sp1", "name": "mban-42", "folder": "/elsewhere", "machine": "local",
+                         "active": False, "tabs": []})
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, {"key": "MBAN-42", "space": "sp1", "branch": None, "worktree": None,
+                               "created": False, "worktree_created": False, "status": "focused"})
+        self.assertEqual(self.selected(), ["sp1"])
+        self.assertEqual(self.opened_space(), [])
+        self.assertEqual(self.wt_switch(), [])
+        self.assertEqual([c for c in self.calls() if c[0] == "git"], [])
+
+    def test_matching_local_branch_switches_and_opens_the_space(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart", "refs/heads/develop")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wt_switch(), [["wt", "switch", "feature/MBAN-42-cart", "--no-cd", "--yes",
+                                             "--format", "json"]])
+        self.assertEqual(self.wt_steps(), [["wt", "step", "copy-ignored", "--require-include"]])
+        worktree = str(self.root / "wt-feature-MBAN-42-cart")
+        self.assertEqual(self.opened_space(), [{"name": "MBAN-42", "folder": worktree,
+                                                "tab": "orchestrator", "argv": ["claude"]}])
+        self.assertEqual(out, {"key": "MBAN-42", "space": "sp-new", "branch": "feature/MBAN-42-cart",
+                               "worktree": worktree, "created": True, "worktree_created": True,
+                               "status": "opened"})
+
+    def test_remote_only_branch_switches_by_its_stripped_name(self):
+        self.set_refs("refs/remotes/origin/feature/MBAN-42-cart")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wt_switch()[0][:3], ["wt", "switch", "feature/MBAN-42-cart"])
+        self.assertEqual(out["branch"], "feature/MBAN-42-cart")
+
+    def test_branch_already_checked_out_is_reused(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        self.set_worktrees({"branch": "feature/MBAN-42-cart", "path": "/main/checkout"})
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wt_switch(), [])
+        self.assertEqual(self.wt_steps(), [])
+        self.assertEqual(self.opened_space()[0]["folder"], "/main/checkout")
+        self.assertEqual((out["worktree"], out["worktree_created"], out["created"]),
+                         ("/main/checkout", False, True))
+
+    def test_new_branch_from_nakama_base(self):
+        env = {**self.env, "NAKAMA_BASE": "develop"}
+        rc, out = self.space("MBAN-42", "--slug", "cart", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wt_switch(), [["wt", "switch", "-c", "feature/MBAN-42-cart", "--base", "develop",
+                                             "--no-cd", "--yes", "--format", "json"]])
+        self.assertEqual(out["branch"], "feature/MBAN-42-cart")
+
+    def test_new_branch_without_base_omits_the_flag(self):
+        env = {k: v for k, v in self.env.items() if k != "NAKAMA_BASE"}
+        rc, out = self.space("MBAN-42", "--slug", "cart", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wt_switch(), [["wt", "switch", "-c", "feature/MBAN-42-cart",
+                                             "--no-cd", "--yes", "--format", "json"]])
+
+    def test_base_flag_beats_nakama_base(self):
+        env = {**self.env, "NAKAMA_BASE": "develop"}
+        rc, out = self.space("MBAN-42", "--slug", "cart", "--base", "main", env=env)
+        self.assertEqual(rc, 0, out)
+        switch = self.wt_switch()[0]
+        self.assertEqual(switch[switch.index("--base") + 1], "main")
+        self.assertNotIn("develop", switch)
+
+    def test_no_match_without_slug_exits_2(self):
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 2)
+        self.assertIn("--slug", out["error"])
+        self.assertEqual((self.wt_switch(), self.opened_space(), self.selected()), ([], [], []))
+
+    def test_two_matches_exit_2_and_branch_resolves(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart", "refs/heads/feature/MBAN-42-checkout")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out["branches"], ["feature/MBAN-42-cart", "feature/MBAN-42-checkout"])
+        self.assertEqual(self.opened_space(), [])
+        rc, out = self.space("MBAN-42", "--branch", "feature/MBAN-42-checkout")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["branch"], "feature/MBAN-42-checkout")
+
+    def test_branch_flag_must_exist(self):
+        rc, out = self.space("MBAN-42", "--branch", "feature/MBAN-42-nowhere")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.opened_space(), [])
+
+    def test_token_boundary_keeps_mban_12_off_mban_123(self):
+        self.set_refs("refs/heads/feature/MBAN-123-x")
+        rc, out = self.space("MBAN-12")
+        self.assertEqual(rc, 2)
+        self.assertIn("--slug", out["error"])
+        self.assertEqual(self.opened_space(), [])
+
+    def test_agent_and_remote_head_refs_are_excluded(self):
+        self.set_refs("refs/heads/agent/MBAN-42-worker", "refs/remotes/origin/HEAD")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 2)
+        self.assertIn("--slug", out["error"])
+
+    def test_slug_with_a_matching_branch_warns_and_is_ignored(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        rc, out = self.space("MBAN-42", "--slug", "other")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["branch"], "feature/MBAN-42-cart")
+        self.assertIn("--slug", out["warnings"][0])
+        self.assertNotIn("-c", self.wt_switch()[0])
+
+    def test_herdr_tui_backend_exits_2(self):
+        env = {k: v for k, v in self.env.items() if k != "HC_TERMINAL_ID"}
+        rc, out = self.space("MBAN-42", env={**env, "HERDR_ENV": "1"})
+        self.assertEqual(rc, 2)
+        self.assertIn("Herdr app", out["error"])
+        self.assertEqual(self.app_calls(), [])
+
+    def test_output_has_exactly_the_documented_keys(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(set(out), {"key", "space", "branch", "worktree", "created", "worktree_created",
+                                    "status"})
+
+    def test_kind_and_model_build_the_orchestrator_argv(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        rc, out = self.space("MBAN-42", "--kind", "pi", "--model", "anthropic/claude-x")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.opened_space()[0]["argv"], ["pi", "--model", "anthropic/claude-x"])
+
+    def test_a_second_run_focuses_the_space_the_first_opened(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        self.assertEqual(self.space("MBAN-42")[1]["status"], "opened")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((out["status"], out["space"], out["branch"], out["worktree"], out["created"]),
+                         ("focused", "sp-new", None, None, False))
+        self.assertEqual(len(self.opened_space()), 1)
+        self.assertEqual(len(self.wt_switch()), 1)
+
+    def test_herdr_app_failure_exits_1_with_its_stderr(self):
+        self.set_refs("refs/heads/feature/MBAN-42-cart")
+        self.set_app(rc=1, stderr="no app session")
+        rc, out = self.space("MBAN-42")
+        self.assertEqual(rc, 1)
+        self.assertIn("no app session", out["stderr"])
 
 
 if __name__ == "__main__":

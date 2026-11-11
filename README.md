@@ -106,6 +106,21 @@ nakama teardown b1-fix-login
 
 For tasks too large for one session but touching the same files, define ordered `## Steps` in `task.md` and commit each checked step with a `Nakama-Step: <k>/<N>` trailer. To pause, `nakama pause <name>|--all` asks builders to leave changes uncommitted and write `## Resume`, then closes their tabs (`--all` also stops the read-only reviewers in that session); `nakama resume <name>` continues from the retained worktree and keeps the budget already spent.
 
+## One Herdr app space per ticket
+
+`nakama space MBAN-1234` focuses the Herdr app space named for that ticket, or opens it on the
+ticket's own branch with an orchestrator agent in that worktree; the workers you launch from that
+orchestrator land as tabs in the same space. A re-run focuses the space instead of creating a
+second one. A branch holding the key as a whole word is reused; with none, `--slug cart` names a
+new `feature/MBAN-1234-cart` (`--base` starts it from a ref, by default `$NAKAMA_BASE` when set,
+else wt's own default). `--branch` picks one branch by hand (several matches otherwise exit 2), and
+`--kind`/`--model` choose the orchestrator's CLI (default `claude`). It needs the Herdr app
+(`HC_TERMINAL_ID`), not the herdr TUI.
+
+Two runs for one key at the same time may race: there is no lock, and re-running repairs what a
+failed run left. A fresh worktree may open on Claude's "trust this folder" dialog; answer it in the
+orchestrator tab, nakama never accepts it for you.
+
 ## Roles
 
 A role is a markdown file: frontmatter plus a persona. Bundled ones live in

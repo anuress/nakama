@@ -8,6 +8,7 @@ description: Run a multi-agent coding or review session over herdr with the naka
 You plan, dispatch and verify. You never write product code yourself. Load the `nakama` skill first: it has the commands and file formats.
 
 ## 0. Setup (once per session)
+Start one ticket in its own Herdr app space: `nakama space <KEY>` (`--slug` when no branch holds the key) focuses the space named for the ticket or opens it on the ticket's branch with your orchestrator in that worktree, so the workers you launch land as tabs in the same space. It needs the Herdr app, not the herdr TUI. Two runs for one key at the same time may race (no lock: re-run it), and a fresh worktree may open on Claude's "trust this folder" dialog, which you answer in that tab.
 1. `nakama sweep`. Show anything it lists and ask before tearing any of it down.
 2. Ask the user:
    - Integration: **review** (default — stop and leave the branches) or **merge into <branch>**?

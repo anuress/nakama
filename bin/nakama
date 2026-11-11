@@ -898,6 +898,106 @@ def cmd_launch(a):
     emit({**out, "status": "ready"})
 
 
+def herdr_app_spaces():
+    """The Herdr app's spaces: a space a failed run left behind is found here by a re-run."""
+    listing = parse_external_json(run(["herdr-app", "ls"]).stdout, "herdr-app ls", {"spaces": list})
+    return find_key(listing, "spaces")
+
+
+def space_named(spaces, key):
+    return next((s for s in spaces if isinstance(s.get("name"), str)
+                 and s["name"].casefold() == key.casefold()), None)
+
+
+def space_branches():
+    """Branches the ticket key may already live on: local heads and remote-tracking refs, no agent/* or HEAD."""
+    refs = run(["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]).stdout.split()
+    names = []
+    for ref in refs:
+        if ref.startswith("refs/heads/"):
+            name = ref[len("refs/heads/"):]
+        elif ref.startswith("refs/remotes/"):
+            # refs/remotes/<remote>/<branch>: the segment after the namespace is the remote, so strip it.
+            name = ref[len("refs/remotes/"):].split("/", 1)[1]
+        else:
+            continue
+        if name == "HEAD" or name.endswith("/HEAD") or name.startswith("agent/"):
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def space_match(key, branch):
+    """The key as a whole token: MBAN-12 must not match feature/MBAN-123-x."""
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(key)}(?![A-Za-z0-9])", branch, re.IGNORECASE) is not None
+
+
+def space_worktree(branch):
+    """Where branch is already checked out (the main checkout included), else None."""
+    trees = find_key(parse_external_json(run(["wt", "list", "--format", "json"]).stdout,
+                                         "wt list", {"items": list}), "items")
+    return next((t["path"] for t in trees
+                 if t.get("branch") == branch and isinstance(t.get("path"), str)), None)
+
+
+def cmd_space(a):
+    require_backend()
+    if backend() != "hc":
+        emit({"error": "nakama space needs the Herdr app (HC_TERMINAL_ID)"}, 2)
+    key = a.key
+    out = {"key": key, "space": None, "branch": None, "worktree": None,
+           "created": False, "worktree_created": False}
+    existing = space_named(herdr_app_spaces(), key)
+    if existing:
+        run(["herdr-app", "do", "space.select", json.dumps({"id": existing["id"]})])
+        emit({**out, "space": existing["id"], "status": "focused"})
+    warnings = []
+    known = space_branches()
+    branch = a.branch
+    if branch and branch not in known:
+        emit({"error": f"no branch {branch} locally or on a remote"}, 2)
+    if not branch:
+        matches = [name for name in known if space_match(key, name)]
+        if len(matches) > 1:
+            emit({"error": f"{key} matches several branches: pass --branch or --slug", "branches": matches}, 2)
+        branch = matches[0] if matches else None
+    if a.slug and branch:
+        warnings.append(f"--slug ignored: branch {branch} already matches {key}")
+    if not branch and not a.slug:
+        emit({"error": f"no branch matches {key}: pass --slug SLUG to create feature/{key}-SLUG"}, 2)
+    new_branch = branch is None
+    if new_branch:
+        branch = f"feature/{key}-{a.slug}"
+    worktree = space_worktree(branch)
+    worktree_created = False
+    if worktree is None:
+        switch = ["wt", "switch"]
+        if new_branch:
+            base = a.base or os.environ.get("NAKAMA_BASE")
+            switch += ["-c", branch, *(["--base", base] if base else [])]
+        else:
+            switch.append(branch)
+        switched = run([*switch, "--no-cd", "--yes", "--format", "json"]).stdout
+        worktree = find_key(parse_external_json(switched, "wt switch", {WT_PATH_KEY: str}), WT_PATH_KEY)
+        worktree_created = True
+        # A copy-ignored failure leaves the worktree: say how to finish it by hand, a re-run would not repeat it.
+        copied = run(["wt", "step", "copy-ignored", "--require-include"], cwd=worktree, check=False)
+        if copied.returncode != 0:
+            emit({"error": "wt step copy-ignored failed", "stderr": copied.stderr.strip()[-300:],
+                  "hint": f"run `wt step copy-ignored --require-include` in {worktree} by hand"}, 1)
+    # A kind and its model flag, as agent_args builds them, but no prompt and no role persona: this is no worker.
+    argv = [a.kind, *(["--model", a.model] if a.model else [])]
+    run(["herdr-app", "do", "space.new",
+         json.dumps({"name": key, "folder": worktree, "tab": "orchestrator", "argv": argv})])
+    opened = space_named(herdr_app_spaces(), key)
+    if opened is None:
+        emit({"error": f"herdr-app opened no space named {key}"}, 1)
+    out.update({"space": opened["id"], "branch": branch, "worktree": worktree,
+                "created": True, "worktree_created": worktree_created, "status": "opened"})
+    emit({**out, **({"warnings": warnings} if warnings else {})})
+
+
 def cmd_resume(a):
     require_backend()
     check_parent_permission()
@@ -2296,6 +2396,9 @@ def cmd_doctor(a):
     check("inside herdr", backend() is not None, "run nakama from a herdr pane", "warn")
     for tool in ("wt", "git"):
         check(f"{tool} on PATH", shutil.which(tool), f"install {tool}")
+    # nakama space drives the Herdr app, which only the hc backend has: an error there, a hint on the TUI.
+    check("herdr-app on PATH", shutil.which("herdr-app"), "install the Herdr app (herdr-app)",
+          "error" if backend() == "hc" else "warn")
     check("pi or claude on PATH", shutil.which("pi") or shutil.which("claude"), "install pi and/or Claude Code")
     # hc reads agent status natively, so the herdr integration checks only apply to the TUI.
     if backend() != "hc" and shutil.which("pi"):
@@ -2369,6 +2472,18 @@ def main():
     where = s.add_mutually_exclusive_group()
     where.add_argument("--join", metavar="AGENT", help="work in that agent's worktree, e.g. a reviewer in the builder's worktree")
     where.add_argument("--no-worktree", action="store_true", help="work in the current checkout")
+
+    s = sub.add_parser("space", help="open or focus this ticket's Herdr app space, with an orchestrator in its worktree",
+                       description="Open (or focus) one Herdr app space per ticket, with an orchestrator agent in that "
+                                   "ticket's own worktree; workers launched from it land as tabs in the same space. "
+                                   "Needs the Herdr app (HC_TERMINAL_ID), not the herdr TUI.")
+    s.add_argument("key", help="ticket key, e.g. MBAN-1234 (task or epic: nakama never looks it up)")
+    s.add_argument("--slug", help="branch suffix: creates feature/<KEY>-<slug> when no branch contains the key")
+    s.add_argument("--base", help="git ref a new branch starts from (default: $NAKAMA_BASE, else wt's own default)")
+    s.add_argument("--branch", help="an existing branch for this key (local or remote); resolves several matches")
+    s.add_argument("--kind", choices=["pi", "claude"], default="claude",
+                   help="agent CLI in the orchestrator tab (default: claude)")
+    s.add_argument("--model", help="model id for that CLI")
 
     s = sub.add_parser("resume", help="restart a worker on its existing worktree and re-prime it")
     s.add_argument("name", help="agent name")
@@ -2468,7 +2583,7 @@ def main():
                        description="Gitignored files new worktrees need (e.g. .env), copied in by 'wt step copy-ignored'.")
     s.add_argument("patterns", nargs="+", help="gitignore-style patterns")
     a = p.parse_args()
-    {"launch": cmd_launch, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
+    {"launch": cmd_launch, "space": cmd_space, "resume": cmd_resume, "prompt": cmd_prompt, "wait": cmd_wait, "send": cmd_send, "inbox": cmd_inbox, "extend": cmd_extend,
      "pause": cmd_pause, "teardown": cmd_teardown, "list": cmd_list, "sweep": cmd_sweep, "roles": cmd_roles,
      "doctor": cmd_doctor, "init": cmd_init, "session": cmd_session, "takeover": cmd_takeover, "brief": cmd_brief,
      "note": cmd_note,
