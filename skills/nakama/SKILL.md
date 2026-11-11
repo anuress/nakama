@@ -1,11 +1,11 @@
 ---
 name: nakama
-description: Run one pi or Claude Code worker (builder, reviewer, researcher, or any custom role) in a herdr pane on any model, with the nakama CLI and the .agent/<name>/ file contract. Use when you need a subagent, or when nakama-orchestrate sends you here. Requires HERDR_ENV=1.
+description: Run one pi or Claude Code worker (builder, reviewer, researcher, or any custom role) in a herdr pane on any model, with the nakama CLI and the .agent/<name>/ file contract. Use when you need a subagent, or when nakama-orchestrate sends you here. Requires a herdr TUI pane (HERDR_ENV=1) or a Herdr app terminal (HC_TERMINAL_ID).
 ---
 
 # nakama
 
-Run `herdr --skill` once per session for herdr itself. Every `nakama` command prints one JSON object. Exit 2 = usage error or not inside herdr: stop and tell the user. If anything looks misconfigured, run `nakama doctor` and show its fixes. Orchestrator session defaults to `HERDR_PANE_ID`; set `NAKAMA_SESSION` to preserve it when restarting in a new pane.
+Run `herdr --skill` once per session for herdr itself (Herdr app: `hc --skill`). Every `nakama` command prints one JSON object. Exit 2 = usage error or not inside a herdr pane or Herdr app terminal: stop and tell the user. If anything looks misconfigured, run `nakama doctor` and show its fixes. Orchestrator session defaults to `HERDR_PANE_ID`; set `NAKAMA_SESSION` to preserve it when restarting in a new pane.
 
 ## Roles
 `nakama roles` prints the roster with each role's file path. A role is a markdown file: frontmatter + persona body. `~/.config/nakama/roles/<role>.md` overrides the bundled one with the same name; add a file to add a role.

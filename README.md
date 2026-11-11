@@ -13,7 +13,7 @@ every agent in its pane and step in whenever you like.
 
 ## How a session goes
 
-You tell your agent, inside herdr, "use nakama-orchestrate to …". The
+You tell your agent, inside a herdr TUI pane or a Herdr app terminal, "use nakama-orchestrate to …". The
 orchestrator proposes a split and waits for your OK. For each task it launches
 a worker in a fresh [worktrunk](https://worktrunk.dev) worktree and writes a
 `task.md` describing the goal, the constraints and the exact commands that
@@ -50,6 +50,13 @@ two CLIs it has launch flags and herdr integrations for (`kind: pi|claude` in a
 role). Supporting another CLI is a small, local change: teach `agent_args` in
 `bin/nakama` how to start it, and make sure herdr can detect its state. Roles
 choose the CLI and model per task, so mixing them is normal.
+
+## Herdr app terminals (hc)
+
+Inside a Herdr app terminal (`HC_TERMINAL_ID` set, run by herdr-core `hc` 0.1.19 or newer) nakama starts
+workers with `hc run` in the caller's GUI space. Limits for now: `--layout split` is refused, named sessions
+(`session start`, `takeover`, `session about`) need the herdr TUI, and a GUI worker's tab keeps the default
+title. `HERDR_ENV=1` wins when both are set.
 
 ## Requirements
 

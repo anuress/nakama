@@ -1,6 +1,6 @@
 ---
 name: nakama-orchestrate
-description: Run a multi-agent coding or review session over herdr with the nakama CLI — split work into tasks, run pi/Claude builders in worktrees, gate, cross-model review, up to 2 fix rounds, then report or merge. Use when the user asks to orchestrate, delegate to a crew, or run builders/reviewers in parallel. Requires HERDR_ENV=1.
+description: Run a multi-agent coding or review session over herdr with the nakama CLI — split work into tasks, run pi/Claude builders in worktrees, gate, cross-model review, up to 2 fix rounds, then report or merge. Use when the user asks to orchestrate, delegate to a crew, or run builders/reviewers in parallel. Requires a herdr TUI pane (HERDR_ENV=1) or a Herdr app terminal (HC_TERMINAL_ID).
 ---
 
 # nakama-orchestrate
