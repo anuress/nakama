@@ -777,7 +777,7 @@ def hc_reports_status(terminal):
     while True:
         got = run(["hc", "get", terminal, "--json"], check=False)
         info = hc_json(got.stdout) if got.returncode == 0 else {}
-        if info.get("status") is not None or info.get("app"):
+        if info.get("status") is not None:
             return True
         if time.monotonic() >= deadline:
             return False
