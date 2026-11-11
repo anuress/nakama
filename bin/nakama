@@ -45,6 +45,8 @@ SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SESSION_ABOUT_MAX = 200
 # What session_key() turns a herdr pane id (w3:p1) into: a name like that would share a legacy run's inbox.
 SESSION_PANE_KEY_RE = re.compile(r"^w[A-Za-z0-9]+_[A-Za-z0-9]+$")
+# hc reports blocked and error alike: nakama treats an errored agent as blocked.
+HC_STATE_MAP = {"error": "blocked"}
 STATUS_VALUES = ("succeeded", "partial", "failed", "needs_input")
 STATUS_VALUE_RE = re.compile(r"^(" + "|".join(STATUS_VALUES) + r")\b")
 STATUS_LINE_RE = re.compile(r"^(?:\*\*)?Status:[ \t]*(.*?)(?:\*\*)?[ \t]*$", re.M)
@@ -73,8 +75,8 @@ def emit(obj, code=0):
     sys.exit(code)
 
 
-def run(cmd, cwd=None, check=True):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def run(cmd, cwd=None, check=True, env=None):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
     if check and p.returncode != 0:
         emit({"error": " ".join(cmd[:3]), "stderr": p.stderr.strip()[-500:]}, 1)
     return p
@@ -211,6 +213,18 @@ def worker_env(name):
 def require_herdr():
     if os.environ.get("HERDR_ENV") != "1":
         emit({"error": "not inside herdr (HERDR_ENV != 1)"}, 2)
+
+
+def backend():
+    # HERDR_ENV wins: a herdr TUI pane inside a Herdr app terminal inherits HC_TERMINAL_ID too.
+    if os.environ.get("HERDR_ENV") == "1":
+        return "herdr"
+    return "hc" if os.environ.get("HC_TERMINAL_ID") else None
+
+
+def require_backend():
+    if backend() is None:
+        emit({"error": "not inside herdr or a Herdr app terminal (HERDR_ENV != 1 and no HC_TERMINAL_ID)"}, 2)
 
 
 def record_path(name):
@@ -394,13 +408,30 @@ def agent_dir(rec):
 
 
 def live_names():
+    if backend() == "hc":
+        data = parse_external_json(run(["hc", "ls", "--json"]).stdout, "hc ls", {"terminals": list})
+        return [t["name"] for t in find_key(data, "terminals") if isinstance(t.get("name"), str) and t["name"]]
     data = parse_external_json(
         run(["herdr", "agent", "list"]).stdout, "herdr agent list", {"agents": list})
     return [a["name"] for a in find_key(data, "agents")
             if isinstance(a, dict) and isinstance(a.get("name"), str) and a["name"]]
 
 
+def hc_agent_state(name):
+    # hc reports a finished terminal as state "finished" with no status: nakama reads that as gone.
+    p = run(["hc", "get", name, "--json"], check=False)
+    if p.returncode != 0:
+        return None
+    data = parse_external_json(p.stdout, "hc get", {"state": str})
+    status = data.get("status")
+    if data.get("state") != "live" or not isinstance(status, dict) or not isinstance(status.get("state"), str):
+        return None
+    return HC_STATE_MAP.get(status["state"], status["state"])
+
+
 def agent_status(name):
+    if backend() == "hc":
+        return hc_agent_state(name)
     p = run(["herdr", "agent", "get", name], check=False)
     if p.returncode != 0:
         return None
@@ -409,7 +440,8 @@ def agent_status(name):
 
 
 def pane_agent(pane):
-    if not isinstance(pane, str) or not pane:
+    # hc has no pane_agent equivalent: no agent session token, so resume and liveness read as None.
+    if backend() == "hc" or not isinstance(pane, str) or not pane:
         return None
     try:
         p = run(["herdr", "agent", "get", pane], check=False)
@@ -463,13 +495,40 @@ def resume_command(token):
 
 
 def visible(name):
+    if backend() == "hc":
+        return run(["hc", "read", name, "--lines", "0"], check=False).stdout
     return run(["herdr", "agent", "read", name, "--source", "visible"], check=False).stdout
 
 
 def screen(name):
+    if backend() == "hc":
+        # hc returns the screen while the agent works, so no visible fallback is needed.
+        return run(["hc", "read", name, "--lines", "60"], check=False).stdout
     # recent-unwrapped is refused while an agent is working; the visible screen always works.
     p = run(["herdr", "agent", "read", name, "--source", "recent-unwrapped", "--lines", "60"], check=False)
     return p.stdout if p.returncode == 0 else visible(name)
+
+
+def send_text(target, text, check=True):
+    """Type text into an agent. A nonzero return means the text was not pushed."""
+    if backend() == "hc":
+        # Without these two vars hc tags the text as <hc from=...>; HC_TERMINAL_SOCKET stays.
+        env = {k: v for k, v in os.environ.items() if k not in ("HC_TERMINAL_ID", "HC_SCOPE")}
+        return run(["hc", "send", target, text], check=check, env=env)
+    return run(["herdr", "agent", "prompt", target, text], check=check)
+
+
+def wait_agent(name, ms):
+    if backend() == "hc":
+        # hc counts seconds, herdr milliseconds.
+        return run(["hc", "wait", name, "--timeout", str(max(3, -(-ms // 1000)))], check=False)
+    return run(["herdr", "agent", "wait", name, "--timeout", str(ms)], check=False)
+
+
+def interrupt(name):
+    if backend() == "hc":
+        return run(["hc", "keys", name, "ctrl+c", "ctrl+c"], check=False)
+    return run(["herdr", "agent", "send-keys", name, "ctrl+c", "ctrl+c"], check=False)
 
 
 def parse_result_status(text):
@@ -632,7 +691,11 @@ def check_parent_permission():
 
 
 def close_worker_surface(rec):
-    if rec.get("tab"):
+    if backend() == "hc":
+        # The record's pane is the hc terminal address; kill, then rm, both best effort.
+        run(["hc", "kill", rec["pane"]], check=False)
+        run(["hc", "rm", rec["pane"]], check=False)
+    elif rec.get("tab"):
         run(["herdr", "tab", "close", rec["tab"]], check=False)
     else:
         run(["herdr", "pane", "close", rec["pane"]], check=False)
@@ -643,7 +706,7 @@ def close_worker_surface(rec):
 
 def stop_worker(rec):
     """Interrupt a worker that will not write a Resume note, then drop any index lock it left held."""
-    run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
+    interrupt(rec["name"])
     close_worker_surface(rec)
     if not rec.get("branch"):
         # --no-worktree workers run in the orchestrator's own checkout: that lock is not ours to delete.
@@ -722,7 +785,7 @@ def launcher_session():
 
 
 def cmd_launch(a):
-    require_herdr()
+    require_backend()
     check_parent_permission()
     meta = load_role(a.role)
     if (a.kind or meta["kind"]) not in ("pi", "claude") or meta["mode"] not in CLAUDE_FLAGS:
@@ -770,7 +833,7 @@ def cmd_launch(a):
 
 
 def cmd_resume(a):
-    require_herdr()
+    require_backend()
     check_parent_permission()
     rec = load(a.name)
     was_paused = rec.get("paused", False)
@@ -823,7 +886,7 @@ def cmd_resume(a):
     prompted_at = time.time()
     # A read worker keeps its original baseline, so a reviewer crash does not forgive what it did before.
     before = rec["git_before"] if rec["mode"] == "read" and rec.get("git_before") else git_state(rec)
-    prompted = run(["herdr", "agent", "prompt", rec["name"], message], check=False)
+    prompted = send_text(rec["name"], message, check=False)
     if prompted.returncode != 0:
         emit({"name": rec["name"], "status": "prompt_failed", "stderr": prompted.stderr.strip()[-300:]}, 1)
     patch_record(rec["name"], prompted_at=prompted_at, git_before=before, receipt=None, nudged_at=None,
@@ -851,7 +914,7 @@ def cmd_prompt(a):
     message = f"Read {rel} and do it. Write result.md with Status exactly one of succeeded, partial, failed, needs_input."
     if task.name == "task.md":
         message += progress_note(rec, dirty=False)
-    run(["herdr", "agent", "prompt", rec["name"], message])
+    send_text(rec["name"], message)
     # Saved only once the prompt reached the agent: a failed prompt spends no round and no time.
     changes = {
         "prompted_at": prompted_at, "git_before": before, "receipt": None, "nudged_at": None,
@@ -943,15 +1006,14 @@ def cmd_wait(a):
             rec["nudged_at"] = time.time()
             patch_record(rec["name"], nudged_at=rec["nudged_at"])
             rel = agent_dir(rec).relative_to(rec["worktree"])
-            run(["herdr", "agent", "prompt", rec["name"], f"Write {rel}/result.md as your task file requires."],
-                check=False)
+            send_text(rec["name"], f"Write {rel}/result.md as your task file requires.", check=False)
             continue
         remaining = deadline - time.time()
         if remaining <= 0:
             done("running")
         if not settled:
             ms = int(max(min(remaining, CHECK_SEC) * 1000, 3000))
-            run(["herdr", "agent", "wait", rec["name"], "--timeout", str(ms)], check=False)
+            wait_agent(rec["name"], ms)
         time.sleep(POLL_SEC)
 
 
@@ -999,12 +1061,12 @@ def send_one(sender, recipient, kind, src, message_id, live_status=None):
     # the prompt (agent_blocked) before sending any key if a dialog is open, so mail then stays in the inbox.
     if recipient == ORCH and kind in PUSH_KINDS and record_path(sender).is_file() and load(sender).get("orch_pane"):
         text = f"Message from {sender} ({kind}): run `nakama inbox` and act on it."
-        pushed = run(["herdr", "agent", "prompt", load(sender)["orch_pane"], text], check=False).returncode == 0
+        pushed = send_text(load(sender)["orch_pane"], text, check=False).returncode == 0
     # herdr hands a prompt to a working agent too (probed on pi): the pointer reaches it mid-task.
     if recipient != ORCH and (agent_status(recipient) if live_status is None else live_status) is not None:
         rel = dest.relative_to(load(recipient)["worktree"])
         text = f"Message from {sender} ({kind}): read {rel} and act on it. It overrides task.md where they conflict."
-        pushed = run(["herdr", "agent", "prompt", recipient, text], check=False).returncode == 0
+        pushed = send_text(recipient, text, check=False).returncode == 0
     return {"to": recipient, "from": sender, "kind": kind, "status": "sent", "file": str(dest), "pushed": pushed}
 
 
@@ -1057,7 +1119,7 @@ def cmd_extend(a):
 
 
 def cmd_pause(a):
-    require_herdr()
+    require_backend()
     if (a.all and a.name) or (not a.all and not a.name):
         emit({"error": "provide exactly one of a worker name or --all"}, 2)
     if a.all:
@@ -1080,7 +1142,7 @@ def cmd_pause(a):
     for rec in selected:
         if rec["mode"] == "read":
             # A read worker holds no uncommitted work: --all stops it instead of pausing it.
-            run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
+            interrupt(rec["name"])
             close_worker_surface(rec)
             # Bank the time spent, so relaunching it does not hand out a fresh budget.
             patch_record(rec["name"], closed=True, spent_min=spent_minutes(rec))
@@ -1173,7 +1235,7 @@ def cmd_teardown(a):
     if a.remove_worktree and rec.get("paused") and not a.force:
         emit({"error": f"{rec['name']} is paused: its worktree holds uncommitted work; "
                        "resume it, or pass --force to discard"}, 2)
-    run(["herdr", "agent", "send-keys", rec["name"], "ctrl+c", "ctrl+c"], check=False)
+    interrupt(rec["name"])
     close_worker_surface(rec)
     removed = False
     reason = None
@@ -1215,7 +1277,7 @@ def cmd_list(a):
 
 
 def cmd_sweep(a):
-    require_herdr()
+    require_backend()
     all_open = open_records()
     recs = all_open if a.all else [r for r in all_open
                                    if record_session(r) == session_key(current_session())]
@@ -1238,7 +1300,7 @@ def cmd_sweep(a):
 
 
 def cmd_session_start(a):
-    require_herdr()
+    require_backend()
     if not SESSION_NAME_RE.fullmatch(a.name):
         emit({"error": f"session name must be letters, numbers, underscores or hyphens; "
                         f"try {session_key(a.name)}"}, 2)
@@ -1361,7 +1423,7 @@ def cmd_session_start(a):
 
 
 def cmd_session_ls(a):
-    require_herdr()
+    require_backend()
     now = time.time()
     by_key = {}
     for rec in readable_records():
@@ -1447,7 +1509,7 @@ def cmd_session_ls(a):
 
 
 def cmd_takeover(a):
-    require_herdr()
+    require_backend()
     if not SESSION_NAME_RE.fullmatch(a.name):
         emit({"error": "session name must be letters, numbers, underscores or hyphens"}, 2)
     here = os.environ.get("HERDR_PANE_ID")
@@ -1550,7 +1612,7 @@ def cmd_takeover(a):
 
 
 def cmd_session_about(a):
-    require_herdr()
+    require_backend()
     key = session_key(current_session())
     text = a.text
     if not text.strip():
@@ -1674,7 +1736,7 @@ def session_rm_warnings(key, meta, alive, here, mode, notes, inbox, preview):
 
 
 def cmd_session_rm(a):
-    require_herdr()
+    require_backend()
     if a.name.casefold() == "default":
         emit({"error": "default is the legacy bucket, not a named session; "
                        "see nakama session ls --legacy"}, 2)
@@ -1770,9 +1832,16 @@ def worker_mail(rec):
     return {"unread": len(files), "kinds": sorted(kinds)}
 
 
+def worker_state(name):
+    # hc has no pane_agent: its worker state comes from agent_status (hc get).
+    if backend() == "hc":
+        return agent_status(name)
+    return (pane_agent(name) or {}).get("agent_status")
+
+
 def cmd_brief(a):
     """Read-only: no record, meta, mail or directory is written here."""
-    require_herdr()
+    require_backend()
     session, source = current_session_with_source()
     key = session_key(session)
     meta = session_meta(key)
@@ -1808,7 +1877,7 @@ def cmd_brief(a):
     for rec in readable_records():
         if record_session(rec) != key or (rec.get("closed") and not a.closed):
             continue
-        state = None if rec.get("closed") else (pane_agent(rec["name"]) or {}).get("agent_status")
+        state = None if rec.get("closed") else worker_state(rec["name"])
         row = {"name": rec.get("name"), "role": rec.get("role"), "kind": rec.get("kind"),
                "worktree": rec.get("worktree"), "rounds": rec.get("rounds"), "state": state,
                "paused": bool(rec.get("paused")), "session": record_session(rec)}
