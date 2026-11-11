@@ -213,11 +213,6 @@ def worker_env(name):
     }
 
 
-def require_herdr():
-    if os.environ.get("HERDR_ENV") != "1":
-        emit({"error": "not inside herdr (HERDR_ENV != 1)"}, 2)
-
-
 def backend():
     # HERDR_ENV wins: a herdr TUI pane inside a Herdr app terminal inherits HC_TERMINAL_ID too.
     if os.environ.get("HERDR_ENV") == "1":
@@ -1992,7 +1987,7 @@ def cmd_brief(a):
 
 def cmd_note(a):
     """Append one line to the session's handoff notes; existing bytes are never rewritten."""
-    require_herdr()
+    require_backend()
     key = session_key(current_session())
     if session_meta(key) is None:
         emit({"error": f"session {key} not named; run: nakama session start <name> --about \"<one line>\""}, 2)
@@ -2168,7 +2163,7 @@ def digest_write(path, document):
 
 
 def cmd_digest(a):
-    require_herdr()
+    require_backend()
     if a.tail < 1:
         emit({"error": "--tail must be at least 1"}, 2)
     if a.max_bytes < 1024:
