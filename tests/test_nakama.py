@@ -4448,6 +4448,7 @@ class NakamaSpaceTest(unittest.TestCase):
     set_state = NakamaTest.set_state
     nakama = NakamaTest.nakama
     calls = NakamaTest.calls
+    launch = NakamaTest.launch
 
     def setUp(self):
         NakamaTest.setUp(self)
@@ -4604,6 +4605,14 @@ class NakamaSpaceTest(unittest.TestCase):
         self.assertEqual(out["branch"], "feature/MBAN-42-cart")
         self.assertIn("--slug", out["warnings"][0])
         self.assertNotIn("-c", self.wt_switch()[0])
+
+    def test_a_worker_without_spawns_cannot_open_a_space(self):
+        builder = self.launch()  # the bundled builder role has no spawns
+        before = len(self.calls())
+        rc, out = self.space("MBAN-42", env={**self.env, "NAKAMA_AGENT": builder["name"]})
+        self.assertEqual(rc, 2)
+        self.assertIn("spawns", out["error"])
+        self.assertEqual([c for c in self.calls()[before:] if c[0] in ("herdr-app", "wt")], [])
 
     def test_herdr_tui_backend_exits_2(self):
         env = {k: v for k, v in self.env.items() if k != "HC_TERMINAL_ID"}

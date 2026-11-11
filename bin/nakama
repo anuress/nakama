@@ -961,6 +961,8 @@ def space_worktree(branch):
 
 def cmd_space(a):
     require_backend()
+    check_parent_permission()
+    # A worker without spawns may not open a crew; the space is a crew's home, so it is not for one either.
     if backend() != "hc":
         emit({"error": "nakama space needs the Herdr app (HC_TERMINAL_ID)"}, 2)
     key = a.key
