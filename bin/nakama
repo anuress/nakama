@@ -717,34 +717,84 @@ def stop_worker(rec):
         Path(lock.stdout.strip()).unlink(missing_ok=True)
 
 
+def hc_caller_info():
+    """The terminal that launched this run: its creation time keys its session, its labels name its space."""
+    return parse_external_json(run(["hc", "get", os.environ["HC_TERMINAL_ID"], "--json"]).stdout,
+                               "hc get", {"created_ms": int})
+
+
+def hc_run_command(rec, meta, env_items):
+    info = hc_caller_info()
+    labels = info.get("labels") if isinstance(info.get("labels"), dict) else {}
+    space = labels.get("herdr.space")
+    # With the space label the worker shows as a tab in the caller's GUI space; without it the worker is hidden.
+    label = ["--label", f"herdr.space={space}"] if isinstance(space, str) and space else []
+    # hc run has no --env flag: the env K=V items wrap the command, and the kind is the agent binary.
+    return ["hc", "run", "--bg", "--json", "--no-notify", "--outlive-parent", "--name", rec["name"],
+            "--cwd", rec["worktree"], *label, "--", "env", *env_items, rec["kind"], *agent_args(rec, meta)]
+
+
+def hc_json(stdout):
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def hc_ready(name):
+    """Ready means live and idle or done. A blocked agent, such as a Claude trust dialog, is not ready."""
+    waited = hc_json(run(["hc", "wait", name, "--timeout", "60", "--json"], check=False).stdout)
+    got = run(["hc", "get", name, "--json"], check=False)
+    info = hc_json(got.stdout) if got.returncode == 0 else {}
+    status = info.get("status") if isinstance(info.get("status"), dict) else {}
+    state = status.get("state") if info.get("state") == "live" else None
+    ready = state in ("idle", "done")
+    return subprocess.CompletedProcess(["hc", "wait", name], 0 if ready else 1, "",
+                                       "" if ready else f"hc status {state or 'none'}, wait reason {waited.get('reason')}")
+
+
+def refuse_split_on_hc(layout):
+    if backend() == "hc" and layout != "tab":
+        emit({"error": "--layout split is not supported in a Herdr app terminal yet"}, 2)
+
+
 def start_worker(rec, meta, layout="tab", direction="right", patch_existing=False):
     # A tab per agent keeps the caller's pane full-size; the herdr sidebar lists every agent.
     # Target the caller's own workspace/pane: herdr's defaults follow focus, which may be elsewhere.
-    if layout == "tab":
-        workspace = os.environ.get("HERDR_WORKSPACE_ID")
-        surface = ["herdr", "tab", "create", *(["--workspace", workspace] if workspace else []),
-                   "--label", rec["name"], "--cwd", rec["worktree"], "--no-focus"]
+    env_items = [f"{key}={value}" for key, value in worker_env(rec["name"]).items()]
+    if backend() == "hc":
+        created = parse_external_json(run(hc_run_command(rec, meta, env_items)).stdout, "hc run", {"address": str})
+        rec["pane"] = find_key(created, "address")
+        rec["tab"] = None
     else:
-        pane = os.environ.get("HERDR_PANE_ID")
-        surface = ["herdr", "pane", "split", *(["--pane", pane] if pane else ["--current"]),
-                   "--direction", direction, "--cwd", rec["worktree"], "--no-focus"]
-    for key, value in worker_env(rec["name"]).items():
-        surface += ["--env", f"{key}={value}"]
-    expected = {"pane_id": str}
-    if layout == "tab":
-        expected["tab_id"] = str
-    command = "herdr tab create" if layout == "tab" else "herdr pane split"
-    created = parse_external_json(run(surface).stdout, command, expected)
-    rec["pane"] = find_key(created, "pane_id")
-    rec["tab"] = find_key(created, "tab_id") if layout == "tab" else None
+        if layout == "tab":
+            workspace = os.environ.get("HERDR_WORKSPACE_ID")
+            surface = ["herdr", "tab", "create", *(["--workspace", workspace] if workspace else []),
+                       "--label", rec["name"], "--cwd", rec["worktree"], "--no-focus"]
+        else:
+            pane = os.environ.get("HERDR_PANE_ID")
+            surface = ["herdr", "pane", "split", *(["--pane", pane] if pane else ["--current"]),
+                       "--direction", direction, "--cwd", rec["worktree"], "--no-focus"]
+        for item in env_items:
+            surface += ["--env", item]
+        expected = {"pane_id": str}
+        if layout == "tab":
+            expected["tab_id"] = str
+        command = "herdr tab create" if layout == "tab" else "herdr pane split"
+        created = parse_external_json(run(surface).stdout, command, expected)
+        rec["pane"] = find_key(created, "pane_id")
+        rec["tab"] = find_key(created, "tab_id") if layout == "tab" else None
     # The GH_CONFIG_DIR worker_env made: teardown removes exactly this one and nothing else.
-    rec["gh_config_dir"] = next(v.split("=", 1)[1] for v in surface if v.startswith("GH_CONFIG_DIR="))
+    rec["gh_config_dir"] = next(v.split("=", 1)[1] for v in env_items if v.startswith("GH_CONFIG_DIR="))
     if patch_existing:
         patch_record(rec["name"], pane=rec["pane"], tab=rec["tab"], gh_config_dir=rec["gh_config_dir"],
                      closed=rec["closed"], prompted_at=rec["prompted_at"], nudged_at=rec["nudged_at"],
                      screen_sig=rec["screen_sig"], screen_changed_at=rec["screen_changed_at"])
     else:
         save(rec)
+    if backend() == "hc":
+        return hc_ready(rec["name"])
     return run(["herdr", "agent", "start", rec["name"], "--kind", rec["kind"], "--pane", rec["pane"],
                 "--timeout", "60000", "--", *agent_args(rec, meta)], check=False)
 
@@ -786,6 +836,7 @@ def launcher_session():
 
 def cmd_launch(a):
     require_backend()
+    refuse_split_on_hc(a.layout)
     check_parent_permission()
     meta = load_role(a.role)
     if (a.kind or meta["kind"]) not in ("pi", "claude") or meta["mode"] not in CLAUDE_FLAGS:
@@ -853,6 +904,7 @@ def cmd_resume(a):
 
     layout = rec.get("layout") or ("tab" if rec.get("tab") else "split")
     if state is None:
+        refuse_split_on_hc(layout)
         if not rec.get("closed"):
             close_worker_surface(rec)
         # Keep paused/paused_forced/pause_sent_at: if the start or the prompt below fails, the record
