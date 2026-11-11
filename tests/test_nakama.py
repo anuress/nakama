@@ -4323,7 +4323,8 @@ class NakamaHcTest(unittest.TestCase):
         self.hc_log.write_text("")
         for name in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID"):
             self.env.pop(name, None)
-        self.env.update({"HC_TERMINAL_ID": "t1", "FAKE_HC_LOG": str(self.hc_log)})
+        self.env.update({"HC_TERMINAL_ID": "t1", "FAKE_HC_LOG": str(self.hc_log),
+                         "NAKAMA_HC_STATUS_GRACE_SEC": "0"})  # no real 20 s wait in tests
 
     def set_hc(self, **hc):
         st = json.loads(self.state.read_text())
@@ -4364,6 +4365,16 @@ class NakamaHcTest(unittest.TestCase):
         out = self.launch()
         self.assertEqual(out["status"], "blocked")
         self.assertIn("blocked", out["stderr"])
+        self.assertNotIn("warnings", out)  # a blocked dialog still reported a status
+
+    def test_launch_warns_when_the_terminal_never_reports_a_status(self):
+        self.set_hc(agent_state=None)
+        out = self.launch()
+        self.assertIn("reports no status to the Herdr app (no OSC 7501)", out["warnings"][0])
+        self.assertIn("nakama teardown + launch/resume", out["warnings"][0])
+
+    def test_launch_has_no_warning_when_the_terminal_reports_a_status(self):
+        self.assertNotIn("warnings", self.launch())
 
     def test_wait_maps_hc_states_to_nakama_states(self):
         out = self.launch()

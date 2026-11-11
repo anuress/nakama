@@ -27,7 +27,7 @@ You are a reviewer: ...
 ## Commands
 | Command | Use |
 |---|---|
-| `nakama launch builder <slug> [--base REF] [--model M] [--name N] [--layout tab\|split]` | new worktree on `agent/<name>` + its own herdr tab (default; `split` = pane beside you) + agent. Returns `name`, `dir`, `worktree` |
+| `nakama launch builder <slug> [--base REF] [--model M] [--name N] [--layout tab\|split]` | new worktree on `agent/<name>` + its own herdr tab (default; `split` = pane beside you) + agent. Returns `name`, `dir`, `worktree`. On the Herdr app it adds `warnings` when the new terminal never answered the app's status probe at startup (`no OSC 7501`): `nakama wait` cannot see that worker settle, so restart it (`nakama teardown` then launch/resume) |
 | `nakama launch reviewer <slug> --join <builder-name>` | reviewer in the builder's worktree, own dir |
 | `nakama launch reviewer <slug> --no-worktree` | review in the current checkout |
 | `nakama space <KEY> [--slug S] [--base REF] [--branch B] [--kind claude\|pi] [--model M]` | one Herdr app space per ticket: focus the space named `<KEY>`, or open it on the key's own branch with an orchestrator in that worktree (a branch holding the key as a whole word is reused; `--slug` names `feature/<KEY>-<slug>` when none does, `--branch` resolves several matches). Returns `space`, `branch`, `worktree`, `status` (`focused` or `opened`). Needs the Herdr app (`HC_TERMINAL_ID`), not the herdr TUI. No lock: two runs for one key may race and re-running repairs it; a fresh worktree may open on Claude's trust dialog, which you answer |

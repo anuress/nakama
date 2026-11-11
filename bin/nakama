@@ -20,6 +20,8 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 STATE_DIR = Path(os.environ.get("NAKAMA_STATE_DIR", str(HOME / ".local/state/nakama")))
 GRACE_SEC = float(os.environ.get("NAKAMA_GRACE_SEC", "20"))
+# How long a new worker terminal gets to report a status to the Herdr app before nakama says it never will.
+HC_STATUS_GRACE_SEC = float(os.environ.get("NAKAMA_HC_STATUS_GRACE_SEC", "20"))
 POLL_SEC = float(os.environ.get("NAKAMA_POLL_SEC", "2"))
 PAUSE_SEC = 300
 
@@ -769,6 +771,19 @@ def hc_ready(name):
                                        "" if ready else f"hc status {state or 'none'}, wait reason {waited.get('reason')}")
 
 
+def hc_reports_status(terminal):
+    """Claude Code asks its terminal for status once at startup (OSC 7501); no reply means it never reports."""
+    deadline = time.monotonic() + HC_STATUS_GRACE_SEC
+    while True:
+        got = run(["hc", "get", terminal, "--json"], check=False)
+        info = hc_json(got.stdout) if got.returncode == 0 else {}
+        if info.get("status") is not None or info.get("app"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_SEC)
+
+
 def refuse_split_on_hc(layout):
     if backend() == "hc" and layout != "tab":
         emit({"error": "--layout split is not supported in a Herdr app terminal yet"}, 2)
@@ -893,6 +908,9 @@ def cmd_launch(a):
     refresh_session_agent(rec["session"])
     started = start_worker(rec, meta, a.layout, a.direction)
     out = {"name": name, "pane": rec["pane"], "worktree": worktree, "branch": branch, "dir": str(agent_dir(rec))}
+    if backend() == "hc" and not hc_reports_status(rec["pane"]):
+        out["warnings"] = [f"{name} reports no status to the Herdr app (no OSC 7501); nakama wait cannot see it "
+                           "settle. Restart the worker (nakama teardown + launch/resume)."]
     if started.returncode != 0:
         emit({**out, "status": "blocked", "stderr": started.stderr.strip()[-300:], "screen": screen(name)})
     emit({**out, "status": "ready"})
