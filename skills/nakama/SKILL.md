@@ -59,7 +59,7 @@ Write task files with your normal file tools into the returned `dir` before prom
 
 A `warnings` field is advisory: the orchestrator decides what to do. A read-mode result also carries `reviewed_head` (HEAD when it was prompted), fixed at its first settled result; before merging, compare it with the branch HEAD.
 
-The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.
+The one exception: if `launch` returns `blocked` and its `screen` is Claude's "trust this folder" dialog for the worktree nakama just created, send `herdr agent send-keys <name> down enter` (Herdr app: `hc keys <name> down enter`; the dialog's default is "No, exit"; `down` selects "Yes, proceed"). Worktrees of a repo Claude already trusts never show it.
 
 ## task.md format
 Optionally place `## Steps` between `## Instructions` and `## Acceptance`; each numbered item uses `<n>. <what> — check: <command>`.
