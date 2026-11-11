@@ -97,13 +97,56 @@ elif args[0] == "list":
     print(json.dumps({"schema": 2, "items": [{"branch": "agent/b1-old"}, {"branch": "develop"}]}))
 '''
 
+FAKE_HC = r'''#!/usr/bin/env python3
+import json, os, sys
+st = json.load(open(os.environ["FAKE_STATE"]))
+hc = st.get("hc", {})
+args = sys.argv[1:]
+with open(os.environ["FAKE_HC_LOG"], "a") as log:
+    log.write(json.dumps({"argv": ["hc", *args], "terminal_env": "HC_TERMINAL_ID" in os.environ}) + "\n")
+cmd = args[0] if args else ""
+if args == ["--version"]:
+    print("hc " + hc.get("version", "0.1.19"))
+elif cmd == "run":
+    name = args[args.index("--name") + 1]
+    print(json.dumps({"address": "t9", "agent": "pi", "cwd": None, "name": name,
+                      "parent": "t1", "state": "live", "turn": 0}))
+elif cmd == "get":
+    if args[1] in hc.get("missing", []):
+        sys.exit(3)
+    if hc.get("terminal_state") == "finished" and args[1] != "t1":
+        state, status = "finished", None
+    else:
+        state = "live"
+        status = None if hc.get("agent_state", "idle") is None else {"app": "pi", "state": hc.get("agent_state", "idle")}
+    print(json.dumps({"address": args[1], "state": state, "status": status,
+                      "labels": {"herdr.space": "s7"}, "created_ms": 1794300123118}))
+elif cmd == "ls":
+    print(json.dumps({"terminals": hc.get("ls", [])}))
+elif cmd == "wait":
+    print(json.dumps({"children": [], "ended": False, "exit_code": None, "reason": "timeout",
+                      "signal": None, "status": None, "terminal": args[1], "turn": 0}))
+elif cmd == "read":
+    print(hc.get("screen", "SCREEN"))
+elif cmd == "send":
+    sys.exit(hc.get("send_rc", 0))
+elif cmd == "keys":
+    pass
+elif cmd == "kill":
+    print(json.dumps({"address": args[1], "state": "finished", "status": None}))
+elif cmd == "rm":
+    print(json.dumps({"removed": args[1]}))
+else:
+    sys.exit(2)
+'''
+
 
 class NakamaTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         bin_dir = self.bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        for name, body in (("herdr", FAKE_HERDR), ("wt", FAKE_WT)):
+        for name, body in (("herdr", FAKE_HERDR), ("wt", FAKE_WT), ("hc", FAKE_HC)):
             path = bin_dir / name
             path.write_text(body)
             path.chmod(0o755)
@@ -121,6 +164,8 @@ class NakamaTest(unittest.TestCase):
         self.env = os.environ.copy()
         self.env.pop("NAKAMA_AGENT", None)
         self.env.pop("NAKAMA_SESSION", None)  # a leaked export would make the session tests vacuous
+        for name in ("HC_TERMINAL_ID", "HC_SCOPE", "HC_TERMINAL_SOCKET"):
+            self.env.pop(name, None)  # a GUI terminal must not switch the suite to hc
         self.env.update({
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "HERDR_ENV": "1",
@@ -4219,6 +4264,130 @@ Broken role.
 
     def test_session_rm_help_listed(self):
         self.assertIn("remove a finished named session", self.help_text("session"))
+
+
+class NakamaHcTest(unittest.TestCase):
+    """Herdr app terminals: the same commands run on herdr-core (hc) when HC_TERMINAL_ID is set."""
+
+    # Borrowed helpers only: subclassing NakamaTest would re-run its herdr tests in this environment.
+    set_state = NakamaTest.set_state
+    nakama = NakamaTest.nakama
+    calls = NakamaTest.calls
+    launch = NakamaTest.launch
+    task = NakamaTest.task
+    doctor_env = NakamaTest.doctor_env
+
+    def setUp(self):
+        NakamaTest.setUp(self)
+        self.hc_log = self.root / "hc.jsonl"
+        self.hc_log.write_text("")
+        for name in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID"):
+            self.env.pop(name, None)
+        self.env.update({"HC_TERMINAL_ID": "t1", "FAKE_HC_LOG": str(self.hc_log)})
+
+    def set_hc(self, **hc):
+        st = json.loads(self.state.read_text())
+        st["hc"] = {**st.get("hc", {}), **hc}
+        self.set_state(**st)
+
+    def hc_calls(self):
+        return [entry["argv"] for entry in map(json.loads, self.hc_log.read_text().splitlines())]
+
+    def hc_entries(self):
+        return [json.loads(line) for line in self.hc_log.read_text().splitlines()]
+
+    def record(self, name):
+        return json.loads((Path(self.env["NAKAMA_STATE_DIR"]) / f"{name}.json").read_text())
+
+    def test_launch_starts_worker_in_caller_space_and_waits_for_ready(self):
+        out = self.launch()
+        run = next(c for c in self.hc_calls() if c[1] == "run")
+        prefix = ["hc", "run", "--bg", "--json", "--no-notify", "--outlive-parent", "--name", out["name"],
+                  "--cwd", out["worktree"], "--label", "herdr.space=s7", "--", "env", f"NAKAMA_AGENT={out['name']}"]
+        self.assertEqual(run[:len(prefix)], prefix)
+        self.assertTrue(any(item.startswith("GH_CONFIG_DIR=") for item in run))
+        self.assertIn("pi", run[run.index("--") + 1:])
+        self.assertIn(["hc", "wait", out["name"], "--timeout", "60", "--json"], self.hc_calls())
+        self.assertEqual(self.record(out["name"])["pane"], "t9")
+        self.assertIsNone(self.record(out["name"])["tab"])
+        self.assertEqual(out["pane"], "t9")
+
+    def test_launch_split_layout_exits_2_before_creating_a_worktree(self):
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", "--layout", "split")
+        self.assertEqual(rc, 2)
+        self.assertIn("split is not supported", out["error"])
+        self.assertFalse(any(c[1] == "run" for c in self.hc_calls()))
+        self.assertFalse(any(c[0] == "wt" for c in self.calls()))
+
+    def test_launch_reports_blocked_when_readiness_is_not_idle(self):
+        self.set_hc(agent_state="blocked")
+        out = self.launch()
+        self.assertEqual(out["status"], "blocked")
+        self.assertIn("blocked", out["stderr"])
+
+    def test_wait_maps_hc_states_to_nakama_states(self):
+        out = self.launch()
+        expected = {"idle": "idle", "done": "done", "working": "working", "blocked": "blocked",
+                    "error": "blocked", None: None}
+        for hc_state, nakama_state in expected.items():
+            self.set_hc(agent_state=hc_state)
+            listed = self.nakama("list")[1]["agents"]
+            self.assertEqual(listed[0]["state"], nakama_state, hc_state)
+        self.set_hc(agent_state="idle", terminal_state="finished")
+        self.assertIsNone(self.nakama("list")[1]["agents"][0]["state"])
+        self.set_hc(terminal_state="live", missing=[out["name"]])
+        self.assertIsNone(self.nakama("list")[1]["agents"][0]["state"])
+
+    def test_prompt_sends_text_with_hc_terminal_id_removed(self):
+        out = self.launch()
+        self.task(out)
+        rc, sent = self.nakama("prompt", out["name"], "task.md")
+        self.assertEqual(rc, 0, sent)
+        send = next(e for e in self.hc_entries() if e["argv"][1] == "send")
+        self.assertEqual(send["argv"][2], out["name"])
+        self.assertTrue(send["argv"][3].startswith("Read "))
+        self.assertFalse(send["terminal_env"])
+
+    def test_teardown_interrupts_kills_and_removes_the_terminal(self):
+        out = self.launch()
+        self.assertEqual(self.nakama("teardown", out["name"])[0], 0)
+        calls = self.hc_calls()
+        order = [c[:2] for c in calls if c[1] in ("keys", "kill", "rm")]
+        self.assertEqual(order, [["hc", "keys"], ["hc", "kill"], ["hc", "rm"]])
+        self.assertIn(["hc", "keys", out["name"], "ctrl+c", "ctrl+c"], calls)
+        self.assertIn(["hc", "kill", "t9"], calls)
+        self.assertIn(["hc", "rm", "t9"], calls)
+
+    def test_session_start_and_takeover_refuse_on_hc(self):
+        rc, out = self.nakama("session", "start", "cart-rework", "--about", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("named sessions need the herdr TUI", out["error"])
+        rc, out = self.nakama("takeover", "cart-rework")
+        self.assertEqual(rc, 2)
+        self.assertIn("named sessions need the herdr TUI", out["error"])
+
+    def test_doctor_passes_with_hc_and_no_herdr_on_path(self):
+        env = self.doctor_env()
+        (self.bin_dir / "herdr").unlink()
+        env = {k: v for k, v in env.items() if k not in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID")}
+        env.update({"HC_TERMINAL_ID": "t1", "PATH": f"{self.bin_dir}:/usr/bin:/bin"})
+        rc, out = self.nakama("doctor", env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["ok"], out)
+        checks = {c["check"]: c["ok"] for c in out["checks"]}
+        self.assertTrue(checks["hc >= 0.1.19"])
+        self.assertNotIn("herdr claude integration", checks)
+
+    def test_herdr_env_wins_over_hc_terminal_id(self):
+        out = self.launch_with_env({**self.env, "HERDR_ENV": "1", "HERDR_PANE_ID": "w3:p1"})
+        self.assertTrue(any(c[1:3] == ["tab", "create"] for c in self.calls()))
+        self.assertEqual(self.hc_calls(), [])
+        self.assertEqual(out["pane"], "w1:p8")
+
+    def launch_with_env(self, env):
+        rc, out = self.nakama("launch", "builder", "Order Tip", "--kind", "pi", env=env)
+        self.assertEqual(rc, 0, out)
+        return out
 
 
 if __name__ == "__main__":
